@@ -365,7 +365,7 @@ fn detail(f: &mut Frame, area: Rect, row: Option<&Row>, now: i64) {
     match row.status {
         Status::Blocked => {
             let text = match row.blocked_reason {
-                Some(r) => format!("{} — switch to its terminal", r.detail()),
+                Some(r) => format!("{} — switch to its terminal, or a to dismiss", r.detail()),
                 None => "waiting on you".to_string(),
             };
             lines.push(Line::styled(
@@ -441,8 +441,8 @@ fn footer(f: &mut Frame, area: Rect, v: &View) {
     };
     let mut spans = vec![Span::raw(" ")];
     spans.extend(key("j/k", "move"));
-    spans.extend(key("a", "ack"));
-    spans.extend(key("u", "unack"));
+    spans.extend(key("a", "ack/dismiss"));
+    spans.extend(key("u", "undo"));
     spans.extend(key("A", "ack all"));
     spans.extend(key("y", "copy continue"));
     spans.extend(key("c", if v.show_clear { "hide clear" } else { "show clear" }));

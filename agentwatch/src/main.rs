@@ -180,9 +180,21 @@ impl App {
 
     fn to_row(&self, s: Session, now: i64) -> Option<Row> {
         let acked = self.store.for_session(&s.id);
-        let status = s.status(now, acked);
-        let blocked_reason = s.blocked_reason(now, acked);
+        let mut status = s.status(now, acked);
+        let mut blocked_reason = s.blocked_reason(now, acked);
         let pending: Vec<String> = s.pending(acked, now).into_iter().map(String::from).collect();
+
+        // A dismissed "waiting on you" session drops off the board until the
+        // agent does something new. Compared against last_activity, not a flag,
+        // so a fresh turn (which advances last_activity) re-surfaces it.
+        if status == Status::Blocked {
+            if let Some(d) = self.store.dismissed_at(&s.id) {
+                if s.last_activity <= d {
+                    status = Status::Clear;
+                    blocked_reason = None;
+                }
+            }
+        }
 
         // A session with no repo edits still matters while it is live -- it is
         // holding an agent slot, and if it is blocked on a question the delay is
@@ -228,12 +240,20 @@ impl App {
         self.sync_list_state();
     }
 
+    /// `a` is context-sensitive: on a waiting session it dismisses that waiting
+    /// state; on an untested session it acks the write-set. Both mean "I have
+    /// handled this", and both re-surface if the agent does something new.
     fn ack_selected(&mut self) {
         let Some(row) = self.rows.get(self.selected) else {
             return;
         };
-        let (id, edits) = (row.id.clone(), row.edits.clone());
-        self.store.ack(&id, &edits);
+        if row.status == Status::Blocked {
+            let (id, ts) = (row.id.clone(), row.last_activity);
+            self.store.dismiss(&id, ts);
+        } else {
+            let (id, edits) = (row.id.clone(), row.edits.clone());
+            self.store.ack(&id, &edits);
+        }
         self.persist();
         self.refresh();
     }
@@ -243,7 +263,12 @@ impl App {
             return;
         };
         let id = row.id.clone();
-        self.store.unack(&id);
+        // Undo whichever suppression applies to this row.
+        if row.status == Status::Blocked {
+            self.store.undismiss(&id);
+        } else {
+            self.store.unack(&id);
+        }
         self.persist();
         self.refresh();
     }

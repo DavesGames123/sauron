@@ -153,21 +153,12 @@ impl Session {
         &self.id[..n]
     }
 
-    /// Shell command to resume this session where it was dropped.
-    ///
-    /// `claude --resume <id>` reattaches by session id, but it resolves which
-    /// project to look in from the current directory. The session's per-record
-    /// cwd is unreliable for this -- it can be a subdirectory, while the log
-    /// itself lives under the repo-root's project dir -- so the caller passes the
-    /// exact directory agentwatch scanned to find this session (the watched repo
-    /// root), which is by definition the one whose project contains it. The id is
-    /// the full uuid (the jsonl filename), not the short form.
-    pub fn continue_command(&self, resume_dir: &str) -> String {
-        if resume_dir.is_empty() {
-            format!("claude --resume {}", self.id)
-        } else {
-            format!("cd {} && claude --resume {}", shell_quote(resume_dir), self.id)
-        }
+    /// Command to resume this dropped session, exactly as copied to the
+    /// clipboard: just `claude --resume <id>`, nothing else. The id is the full
+    /// uuid (the jsonl filename), not the short form. Run it from the repo it
+    /// belongs to so `--resume` resolves the right project.
+    pub fn continue_command(&self) -> String {
+        format!("claude --resume {}", self.id)
     }
 
     /// Title if the session has earned one, else a trimmed last prompt, else the id.
@@ -344,19 +335,6 @@ pub fn collapse_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Single-quote a path for a POSIX shell so a directory with spaces or other
-/// metacharacters survives being pasted into a terminal. Any embedded single
-/// quote is closed, escaped, and reopened -- the standard `'\''` dance.
-pub fn shell_quote(s: &str) -> String {
-    if !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '~'))
-    {
-        return s.to_string();
-    }
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
 pub fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -386,30 +364,12 @@ mod tests {
     }
 
     #[test]
-    fn continue_command_targets_the_session_from_the_watched_root() {
+    fn continue_command_is_just_the_resume_line() {
         let mut s = Session::default();
         s.id = "6c6f86f2-1234".into();
-        // Empty dir: bare resume by id.
-        assert_eq!(s.continue_command(""), "claude --resume 6c6f86f2-1234");
-        // The watched repo root is prepended, so resume resolves the right
-        // project even when the session's own cwd was a subdirectory.
-        assert_eq!(
-            s.continue_command("/Users/d/Downloads/barnes-hut"),
-            "cd /Users/d/Downloads/barnes-hut && claude --resume 6c6f86f2-1234"
-        );
-        // A path with a space is quoted so it survives a paste.
-        assert_eq!(
-            s.continue_command("/Users/d/My Projects/x"),
-            "cd '/Users/d/My Projects/x' && claude --resume 6c6f86f2-1234"
-        );
-    }
-
-    #[test]
-    fn shell_quote_escapes_only_when_needed() {
-        assert_eq!(shell_quote("/plain/path-1.rs"), "/plain/path-1.rs");
-        assert_eq!(shell_quote("has space"), "'has space'");
-        // Embedded single quote is closed/escaped/reopened.
-        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        // Only `claude --resume <id>` -- no cd, no extra text, so the clipboard
+        // holds exactly the command and nothing else.
+        assert_eq!(s.continue_command(), "claude --resume 6c6f86f2-1234");
     }
 
     #[test]

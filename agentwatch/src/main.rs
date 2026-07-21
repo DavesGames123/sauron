@@ -206,10 +206,7 @@ impl App {
             pending,
             total_edits: s.edits.len(),
             last_prompt: s.last_prompt.clone(),
-            // Resume from the exact directory whose project dir agentwatch
-            // scanned to find this session -- the watched repo root -- so
-            // `claude --resume` looks in the right place.
-            continue_cmd: s.continue_command(&self.scanner.repo_root().to_string_lossy()),
+            continue_cmd: s.continue_command(),
             edits: s.edits,
         })
     }

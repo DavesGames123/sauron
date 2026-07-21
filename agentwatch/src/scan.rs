@@ -154,14 +154,6 @@ fn fold_record(session: &mut Session, v: &Value, repo_root: &Path) {
         }
     }
 
-    // Working directory the session ran in. Needed to build a resume command
-    // that lands in the right project. Keep the latest non-empty value.
-    if let Some(dir) = v.get("cwd").and_then(|c| c.as_str()) {
-        if !dir.is_empty() {
-            session.cwd = Some(dir.to_string());
-        }
-    }
-
     // Turn tracking. An assistant message carries `stop_reason`: `end_turn`
     // means it handed control back, anything else (`tool_use`, `max_tokens`)
     // means more is coming. A non-meta user record afterwards -- a tool result

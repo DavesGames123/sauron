@@ -142,10 +142,6 @@ pub struct Session {
     /// tool_use ids of any kind with no tool_result yet. Combined with a silent
     /// log this is the only available trace of a pending permission prompt.
     pub pending_tools: BTreeSet<String>,
-    /// Working directory the session ran in, from the log's `cwd` field. Needed
-    /// to resume it: `claude --resume` keys the session to a project derived
-    /// from cwd, so the resume must run from the same directory.
-    pub cwd: Option<String>,
     /// Repo-relative path -> epoch millis of its most recent write by this session.
     pub edits: BTreeMap<String, i64>,
 }
@@ -159,16 +155,18 @@ impl Session {
 
     /// Shell command to resume this session where it was dropped.
     ///
-    /// `claude --resume <id>` reattaches by session id, but it resolves the
-    /// project from the current directory, so it must be run from the session's
-    /// original cwd -- hence the `cd` prefix when we know it. The id is the full
-    /// uuid (the jsonl filename), not the short form.
-    pub fn continue_command(&self) -> String {
-        match &self.cwd {
-            Some(dir) if !dir.is_empty() => {
-                format!("cd {} && claude --resume {}", shell_quote(dir), self.id)
-            }
-            _ => format!("claude --resume {}", self.id),
+    /// `claude --resume <id>` reattaches by session id, but it resolves which
+    /// project to look in from the current directory. The session's per-record
+    /// cwd is unreliable for this -- it can be a subdirectory, while the log
+    /// itself lives under the repo-root's project dir -- so the caller passes the
+    /// exact directory agentwatch scanned to find this session (the watched repo
+    /// root), which is by definition the one whose project contains it. The id is
+    /// the full uuid (the jsonl filename), not the short form.
+    pub fn continue_command(&self, resume_dir: &str) -> String {
+        if resume_dir.is_empty() {
+            format!("claude --resume {}", self.id)
+        } else {
+            format!("cd {} && claude --resume {}", shell_quote(resume_dir), self.id)
         }
     }
 
@@ -388,21 +386,20 @@ mod tests {
     }
 
     #[test]
-    fn continue_command_targets_the_session_and_its_cwd() {
+    fn continue_command_targets_the_session_from_the_watched_root() {
         let mut s = Session::default();
         s.id = "6c6f86f2-1234".into();
-        // No cwd: bare resume by id.
-        assert_eq!(s.continue_command(), "claude --resume 6c6f86f2-1234");
-        // With cwd: cd first, so resume resolves the right project.
-        s.cwd = Some("/Users/d/Downloads/barnes-hut".into());
+        // Empty dir: bare resume by id.
+        assert_eq!(s.continue_command(""), "claude --resume 6c6f86f2-1234");
+        // The watched repo root is prepended, so resume resolves the right
+        // project even when the session's own cwd was a subdirectory.
         assert_eq!(
-            s.continue_command(),
+            s.continue_command("/Users/d/Downloads/barnes-hut"),
             "cd /Users/d/Downloads/barnes-hut && claude --resume 6c6f86f2-1234"
         );
         // A path with a space is quoted so it survives a paste.
-        s.cwd = Some("/Users/d/My Projects/x".into());
         assert_eq!(
-            s.continue_command(),
+            s.continue_command("/Users/d/My Projects/x"),
             "cd '/Users/d/My Projects/x' && claude --resume 6c6f86f2-1234"
         );
     }

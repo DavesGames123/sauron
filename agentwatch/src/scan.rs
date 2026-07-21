@@ -175,6 +175,17 @@ fn fold_record(session: &mut Session, v: &Value, repo_root: &Path) {
                 session.turn_complete = false;
             }
         }
+        // The stop hook fires when a turn ends and emits these. They are a more
+        // robust turn-end marker than end_turn alone: an agent that stopped to
+        // ask a question in prose still triggers them, and they arrive after any
+        // trailing assistant record. This is what catches the idle-at-prompt
+        // case that end_turn tracking alone missed.
+        "system" => {
+            let sub = v.get("subtype").and_then(|s| s.as_str());
+            if matches!(sub, Some("stop_hook_summary") | Some("turn_duration")) {
+                session.turn_complete = true;
+            }
+        }
         _ => {}
     }
 

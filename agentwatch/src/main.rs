@@ -109,6 +109,9 @@ impl App {
             a.status
                 .rank()
                 .cmp(&b.status.rank())
+                // Within the blocked band, a certain question outranks a guessed
+                // approval outranks a plain idle-stop (BlockedReason is ordered).
+                .then(a.blocked_reason.cmp(&b.blocked_reason))
                 .then(b.last_activity.cmp(&a.last_activity))
         });
 
@@ -142,7 +145,7 @@ impl App {
     fn to_row(&self, s: Session, now: i64) -> Option<Row> {
         let acked = self.store.for_session(&s.id);
         let status = s.status(now, acked);
-        let blocked_reason = s.blocked_reason(now);
+        let blocked_reason = s.blocked_reason(now, acked);
         let pending: Vec<String> = s.pending(acked, now).into_iter().map(String::from).collect();
 
         // A session with no repo edits still matters while it is live -- it is
@@ -373,16 +376,16 @@ fn print_once(app: &App) {
         println!("no sessions with repo edits");
         return;
     }
-    let awaiting = app
-        .rows
-        .iter()
-        .filter(|r| r.status == Status::NeedsTest)
-        .count();
-    if awaiting > 0 {
-        println!("{} AWAITING YOU\n", awaiting);
-    } else {
-        println!("all caught up\n");
+    let blocked = app.rows.iter().filter(|r| r.status == Status::Blocked).count();
+    let needs = app.rows.iter().filter(|r| r.status == Status::NeedsTest).count();
+    let mut banner = Vec::new();
+    if blocked > 0 {
+        banner.push(format!("{} WAITING ON YOU", blocked));
     }
+    if needs > 0 {
+        banner.push(format!("{} to test", needs));
+    }
+    println!("{}\n", if banner.is_empty() { "all caught up".into() } else { banner.join("  ·  ") });
 
     for r in &app.rows {
         let glyph = match r.status {
@@ -398,7 +401,12 @@ fn print_once(app: &App) {
             model::ago(r.last_activity, now),
             r.status.label()
         );
-        if r.pending.is_empty() {
+        // Blocked sessions: what they want matters more than a file count.
+        if r.status == Status::Blocked {
+            if let Some(reason) = r.blocked_reason {
+                println!("    {}", reason.detail());
+            }
+        } else if r.pending.is_empty() {
             println!("    {} file(s), all acked", r.total_edits);
         } else {
             for p in r.pending.iter().take(6) {

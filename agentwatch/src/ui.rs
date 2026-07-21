@@ -202,7 +202,7 @@ fn list(f: &mut Frame, area: Rect, v: &View, list_state: &mut ListState) {
 /// "needs me" and "does not" without reading any labels.
 fn section_header(status: Status, count: usize, width: usize) -> ListItem<'static> {
     let (label, color) = match status {
-        Status::Blocked => ("BLOCKED — WAITING ON YOUR ANSWER", RED),
+        Status::Blocked => ("WAITING ON YOU", RED),
         Status::NeedsTest => ("AWAITING ACKNOWLEDGEMENT", AMBER),
         Status::Working => ("WORKING", CYAN),
         Status::Clear => ("CLEAR", DIM),

@@ -39,14 +39,26 @@ pub const STALE_HORIZON_MS: i64 = 12 * 60 * 60 * 1000;
 /// actually wastes the day.
 pub const STALL_AFTER_MS: i64 = 45_000;
 
-/// Why a session is waiting on the user.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A turn that ended this recently is treated as "the agent just handed the
+/// conversation back and is idle at the prompt". Past this, a finished session
+/// is old news, not something waiting on you -- which is what keeps yesterday's
+/// completed sessions out of the attention band.
+pub const RECENT_STOP_MS: i64 = 20 * 60 * 1000;
+
+/// Why a session is waiting on the user, most urgent first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BlockedReason {
     /// AskUserQuestion / ExitPlanMode with no result: certain.
     Question,
     /// Unresolved tool call plus a silent log: probable permission prompt, but
     /// indistinguishable from a genuinely slow command.
     MaybeApproval,
+    /// Turn ended and the agent is idle at the prompt. The single most common
+    /// "waiting on you": an agent that asked something in prose, or offered a
+    /// plan, or simply finished and wants the next instruction, all end the turn
+    /// the same way. Cannot be told apart from a clean completion in the log, so
+    /// this deliberately surfaces both -- a glance settles which.
+    AwaitingInput,
 }
 
 impl BlockedReason {
@@ -58,6 +70,9 @@ impl BlockedReason {
             BlockedReason::MaybeApproval => {
                 "tool call unresolved and log quiet — likely a permission prompt, or a slow command"
             }
+            BlockedReason::AwaitingInput => {
+                "agent ended its turn and is idle — waiting for your reply, or finished and wants the next step"
+            }
         }
     }
 
@@ -65,6 +80,7 @@ impl BlockedReason {
         match self {
             BlockedReason::Question => "asked you a question",
             BlockedReason::MaybeApproval => "may need approval",
+            BlockedReason::AwaitingInput => "stopped — your move",
         }
     }
 }
@@ -87,7 +103,7 @@ pub enum Status {
 impl Status {
     pub fn label(self) -> &'static str {
         match self {
-            Status::Blocked => "NEEDS YOUR ANSWER",
+            Status::Blocked => "WAITING ON YOU",
             Status::Working => "working",
             Status::NeedsTest => "NEEDS TEST",
             Status::Clear => "clear",
@@ -179,26 +195,51 @@ impl Session {
             .collect()
     }
 
-    /// Why this session is waiting on the user, if it is.
-    pub fn blocked_reason(&self, now: i64) -> Option<BlockedReason> {
+    /// Why this session is waiting on the user, if it is. Single source of truth
+    /// for the whole "needs a human" question; `status` is derived from it.
+    ///
+    /// The ladder, most urgent first:
+    ///   1. an open question tool  -> certain, waiting.
+    ///   2. an unresolved tool call gone quiet -> probable permission prompt.
+    ///   3. mid-turn -> not waiting (the agent is computing, come back later).
+    ///   4. turn settled with untested edits -> that is NeedsTest, not "waiting".
+    ///   5. turn settled, nothing to test, stopped recently -> idle at the prompt.
+    pub fn blocked_reason(
+        &self,
+        now: i64,
+        acked: Option<&BTreeMap<String, i64>>,
+    ) -> Option<BlockedReason> {
         if !self.open_questions.is_empty() {
             return Some(BlockedReason::Question);
         }
+        let quiet = now.saturating_sub(self.last_activity);
         // Nothing logged for a while with a tool call still open. Most often a
         // permission prompt sitting unanswered on some other terminal.
-        if !self.pending_tools.is_empty()
-            && now.saturating_sub(self.last_activity) > STALL_AFTER_MS
-        {
+        if !self.pending_tools.is_empty() && quiet > STALL_AFTER_MS {
             return Some(BlockedReason::MaybeApproval);
+        }
+        let stuck = quiet > STUCK_AFTER_MS;
+        // Still mid-turn: computing, not waiting.
+        if !self.turn_complete && !stuck {
+            return None;
+        }
+        // Turn settled. Untested edits are their own state (NeedsTest); do not
+        // also call them "waiting on you".
+        if !self.pending(acked, now).is_empty() {
+            return None;
+        }
+        // Settled, nothing to test, and the agent stopped recently -- it is
+        // sitting idle at the prompt. Old finished sessions fall through to
+        // Clear so they do not clutter the attention band forever.
+        if self.turn_complete && quiet <= RECENT_STOP_MS {
+            return Some(BlockedReason::AwaitingInput);
         }
         None
     }
 
     pub fn status(&self, now: i64, acked: Option<&BTreeMap<String, i64>>) -> Status {
-        // A session waiting on a human outranks everything: it is doing nothing
-        // at all until someone replies, so this is the only state where the
-        // delay is entirely the user's to remove.
-        if self.blocked_reason(now).is_some() {
+        // Anything waiting on a human outranks everything else.
+        if self.blocked_reason(now, acked).is_some() {
             return Status::Blocked;
         }
         // Mid-turn means the write set is still moving. Reporting it as testable
@@ -362,14 +403,14 @@ mod tests {
         s.pending_tools.insert("toolu_1".into());
 
         // Just issued: the tool is presumably running.
-        assert_eq!(s.blocked_reason(now), None);
+        assert_eq!(s.blocked_reason(now, None), None);
         assert_eq!(s.status(now, None), Status::Working);
 
         // Still unresolved and nothing logged since: almost always a permission
         // prompt sitting on another terminal.
         let later = now + STALL_AFTER_MS + 1;
         assert_eq!(
-            s.blocked_reason(later),
+            s.blocked_reason(later, None),
             Some(BlockedReason::MaybeApproval)
         );
         assert_eq!(s.status(later, None), Status::Blocked);
@@ -383,7 +424,44 @@ mod tests {
         s.pending_tools.insert("toolu_1".into());
         s.open_questions.insert("toolu_1".into());
         // Both conditions hold; report the one we are certain about.
-        assert_eq!(s.blocked_reason(now), Some(BlockedReason::Question));
+        assert_eq!(s.blocked_reason(now, None), Some(BlockedReason::Question));
+    }
+
+    #[test]
+    fn idle_at_prompt_after_a_finished_turn_is_surfaced() {
+        // The warpcore-dossier case: turn ended, no edits, no pending tool. The
+        // agent is sitting at the prompt waiting for a typed reply, and the old
+        // model dropped this as Clear.
+        let now = 1_000_000_000i64;
+        let mut s = Session::default();
+        s.turn_complete = true;
+        s.last_activity = now - 5_000; // stopped 5s ago
+
+        assert_eq!(
+            s.blocked_reason(now, None),
+            Some(BlockedReason::AwaitingInput)
+        );
+        assert_eq!(s.status(now, None), Status::Blocked);
+
+        // But an ancient finished session is not "waiting" -- it is history, and
+        // must fall through to Clear so it does not clog the attention band.
+        let stale = now + RECENT_STOP_MS + 1;
+        assert_eq!(s.blocked_reason(stale, None), None);
+        assert_eq!(s.status(stale, None), Status::Clear);
+    }
+
+    #[test]
+    fn finished_turn_with_untested_edits_is_needstest_not_waiting() {
+        // Edits to test are their own signal; do not double-count them as
+        // "waiting on you".
+        let now = 1_000_000_000i64;
+        let mut s = Session::default();
+        s.turn_complete = true;
+        s.last_activity = now - 5_000;
+        s.edits.insert("src/a.rs".into(), now - 5_000);
+
+        assert_eq!(s.blocked_reason(now, None), None);
+        assert_eq!(s.status(now, None), Status::NeedsTest);
     }
 
     #[test]
@@ -391,8 +469,9 @@ mod tests {
         let now = 1_000_000_000i64;
         let mut s = Session::default();
         s.last_activity = now - STALL_AFTER_MS - 1;
-        // Nothing pending: quiet just means between turns, not blocked.
-        assert_eq!(s.blocked_reason(now), None);
+        // Mid-turn, nothing pending: quiet just means between records, not
+        // blocked, and not yet a finished turn.
+        assert_eq!(s.blocked_reason(now, None), None);
     }
 
     #[test]

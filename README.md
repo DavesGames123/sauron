@@ -1,71 +1,115 @@
-# agentwatch
+<div align="center">
 
-A pair of tools for running several [Claude Code](https://claude.com/claude-code)
-agents at once and keeping track of what they changed.
+# 🛰️ agentwatch
 
-- **`agentwatch`** — a terminal sidecar that answers one question: *what did my
-  agents change that I have not tested yet?* It reads the Claude Code session
-  logs, flags each session as needing a test / blocked / clear, and lets you
-  acknowledge work as you verify it. It writes nothing to your repo and never
-  talks to a running agent.
-- **`workspace`** — a macOS/iTerm2 launcher that opens a fullscreen multi-agent
-  layout on its own Space: a column of bare `claude` panes plus `agentwatch` and
-  a couple of shells.
+### Know what your agents changed — before you ship it.
 
-The two are independent — `agentwatch` works on its own from any terminal;
-`workspace` just wires it into a ready-made layout.
+A read-only sidecar for running **many [Claude Code](https://claude.com/claude-code) agents at once** and never losing track of which ones left work you haven't tested.
 
-## agentwatch
+<br>
 
-### Build
+![Rust](https://img.shields.io/badge/built_with-Rust-CE422B?style=for-the-badge&logo=rust&logoColor=white)
+![ratatui](https://img.shields.io/badge/TUI-ratatui-7C3AED?style=for-the-badge)
+![macOS](https://img.shields.io/badge/workspace-macOS_·_iTerm2-000000?style=for-the-badge&logo=apple&logoColor=white)
+![Read only](https://img.shields.io/badge/repo_writes-none-2EA043?style=for-the-badge)
 
-```bash
-cargo build --release --manifest-path agentwatch/Cargo.toml
+</div>
+
+<br>
+
+```
+┌─ agentwatch ─────────────────────────────────────────────┐
+│  ● letters-redesign    NEEDS TEST   src/gui/letters.rs    │
+│  ▲ flora-field-tick    BLOCKED      waiting on you        │
+│  ● combat-armory       NEEDS TEST   3 files               │
+│  ○ crossword-fetch     clear                              │
+└──────────────────────────────────────────────────────────┘
+     j/k move   ·   a ack   ·   b baseline   ·   q quit
 ```
 
-The binary lands at `agentwatch/target/release/agentwatch`. Copy it onto your
-`PATH` if you like:
+---
+
+## Why
+
+When you fan out a swarm of coding agents, the bottleneck stops being *writing*
+code and becomes *trusting* it. Which sessions actually touched the repo? Which
+are quietly **blocked on a question only you can answer**? What have you already
+reviewed? **agentwatch** answers exactly that — and nothing else.
+
+It reads the Claude Code session logs under
+`~/.claude/projects/<repo>/*.jsonl`, re-tailing every two seconds. It **writes
+nothing to your repo** and **never talks to a running agent**.
+
+<br>
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### 🛰️ `agentwatch`
+The terminal sidecar. One question, answered live:
+> *what did my agents change that I haven't tested yet?*
+
+- Flags each session **needs-test · blocked · clear**
+- **Acknowledge** work as you verify it — progress persists
+- Surfaces sessions **blocked on a question** first
+- Collapses the historical backlog so *today's* work stays visible
+
+</td>
+<td width="50%" valign="top">
+
+### 🪟 `workspace`
+The macOS/iTerm2 launcher. One command, a whole cockpit:
+
+- Opens a **fullscreen layout on its own Space**
+- A column of **bare `claude` panes** (pick how many)
+- `agentwatch` wired into the top-right, shells below
+- Panes stay evenly sized no matter the agent count
+
+</td>
+</tr>
+</table>
+
+---
+
+## 🚀 Quick start
+
+```bash
+# 1 · build the sidecar
+cargo build --release --manifest-path agentwatch/Cargo.toml
+
+# 2 · watch the repo you're standing in
+./agentwatch/target/release/agentwatch
+
+# …or watch a specific repo
+./agentwatch/target/release/agentwatch /path/to/repo
+```
+
+Drop it on your `PATH` to call it from anywhere:
 
 ```bash
 cp agentwatch/target/release/agentwatch /usr/local/bin/
 ```
 
-### Run
+---
 
-```bash
-agentwatch                  # watch the repo containing the cwd
-agentwatch /path/to/repo    # watch a specific repo
-```
+## ⌨️ Keys
 
-It reads `~/.claude/projects/<encoded-repo-path>/*.jsonl`, re-tailing every two
-seconds (only appended bytes are parsed, so it stays cheap on large logs).
+| Key | Action |
+|:---:|:-------|
+| <kbd>j</kbd> / <kbd>k</kbd> | move selection |
+| <kbd>a</kbd> | acknowledge selected session — mark its edits tested |
+| <kbd>u</kbd> | un-acknowledge |
+| <kbd>b</kbd> | **baseline** — ack the whole historical backlog, start empty |
+| <kbd>c</kbd> | toggle cleared / idle sessions |
+| <kbd>A</kbd> | toggle the stale backlog |
+| <kbd>q</kbd> | quit |
 
-### Keys
+---
 
-| Key       | Action                                                        |
-|-----------|---------------------------------------------------------------|
-| `j` / `k` | move selection                                                |
-| `a`       | acknowledge the selected session (mark its edits as tested)   |
-| `u`       | un-acknowledge                                                |
-| `b`       | baseline — ack the entire historical backlog, start empty     |
-| `c`       | toggle showing cleared/idle sessions                          |
-| `A`       | toggle showing the stale backlog                              |
-| `q`       | quit                                                          |
+## 🪟 workspace — the multi-agent cockpit
 
-Status ranking surfaces blocked and needs-test sessions first; cleared and idle
-ones are counted but collapsed so today's outstanding work stays visible.
-
-### How it reads sessions
-
-Claude Code encodes a project path by replacing separators with dashes, e.g.
-`/Users/you/code/my-repo` → `~/.claude/projects/-Users-you-code-my-repo/`.
-agentwatch folds each session's `file-history-delta` records into a per-session
-edit set, subtracts what you have acknowledged, and shows the remainder.
-
-Acknowledgements persist in a small state file so restarting the tool does not
-lose your progress.
-
-## workspace (macOS + iTerm2)
+> **macOS + iTerm2 only.**
 
 ```bash
 workspace/workspace.sh          # 4 agent panes for the current repo
@@ -73,24 +117,51 @@ workspace/workspace.sh 8        # 8 agent panes
 WORKSPACE_REPO=/path workspace/workspace.sh   # a specific repo
 ```
 
-It creates a new iTerm2 window, puts it into native fullscreen (which gives it
-its own macOS Space), then splits it into a left column of `claude` panes and a
-right column with `agentwatch` on top.
+It spins up a new iTerm2 window, throws it into native fullscreen (which gives
+it its own macOS Space), then splits it into a left column of `claude` panes and
+a right column with `agentwatch` on top.
 
-By default the launcher looks for the binary at
-`agentwatch/target/release/agentwatch` next to this repo; set `AGENTWATCH=/path`
-or put `agentwatch` on your `PATH` to override.
+By default the launcher looks for the binary next to this repo
+(`agentwatch/target/release/agentwatch`). Override with `AGENTWATCH=/path`, or
+just put `agentwatch` on your `PATH`.
 
-### Requirements
+<details>
+<summary><b>Requirements</b></summary>
+
+<br>
 
 - iTerm2 with the AppleScript API enabled
 - Accessibility permission granted to iTerm2
-  (System Settings → Privacy & Security → Accessibility) — needed for the
+  (**System Settings → Privacy & Security → Accessibility**) — needed for the
   fullscreen toggle.
 
-## Layout
+</details>
+
+---
+
+## 🔍 How it reads sessions
+
+Claude Code encodes a project path by swapping separators for dashes:
 
 ```
-agentwatch/        Rust crate — the TUI sidecar
-workspace/         iTerm2 multi-agent launcher
+/Users/you/code/my-repo   →   ~/.claude/projects/-Users-you-code-my-repo/
 ```
+
+agentwatch folds each session's `file-history-delta` records into a per-session
+edit set, subtracts what you've acknowledged, and shows the remainder.
+Acknowledgements live in a small state file, so restarting never loses your
+place.
+
+---
+
+## 🗂️ Layout
+
+```
+agentwatch/   ·  Rust crate — the TUI sidecar
+workspace/    ·  iTerm2 multi-agent launcher
+```
+
+<div align="center">
+<br>
+<sub>Reads your logs. Touches nothing.</sub>
+</div>

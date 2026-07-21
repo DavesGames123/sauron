@@ -24,7 +24,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
+    MouseEventKind,
+};
+use ratatui::crossterm::execute;
 use ratatui::widgets::ListState;
 
 use model::{now_ms, BlockedReason, Session, Status, DORMANT_AFTER_MS, STALE_HORIZON_MS};
@@ -48,6 +52,8 @@ pub struct Row {
     pub pending: Vec<String>,
     pub total_edits: usize,
     pub last_prompt: Option<String>,
+    /// `cd <cwd> && claude --resume <id>` -- reattach a dropped thread.
+    pub continue_cmd: String,
     pub edits: BTreeMap<String, i64>,
 }
 
@@ -65,6 +71,15 @@ struct App {
     selected: usize,
     repo_label: String,
     saved_until: Option<Instant>,
+    /// Transient "copied" banner deadline.
+    copied_until: Option<Instant>,
+    /// Per-frame list geometry, refreshed each draw, so a mouse click can be
+    /// mapped back to the row under it. Heights and row-mapping run parallel to
+    /// the items the list widget draws, in the same order.
+    frame_item_heights: Vec<u16>,
+    frame_item_rows: Vec<Option<usize>>,
+    list_top: u16,
+    list_height: u16,
 }
 
 impl App {
@@ -86,9 +101,30 @@ impl App {
             selected: 0,
             repo_label,
             saved_until: None,
+            copied_until: None,
+            frame_item_heights: Vec::new(),
+            frame_item_rows: Vec::new(),
+            list_top: 0,
+            list_height: 0,
         };
         app.refresh();
+        app.focus_first_actionable();
         app
+    }
+
+    /// On launch, land the cursor on the thing most likely to want the user:
+    /// a session waiting on them, else one actively working, else untested work.
+    /// Runs once at startup; later refreshes preserve the selection by id, so the
+    /// cursor is not yanked around as statuses churn.
+    fn focus_first_actionable(&mut self) {
+        let order = [Status::Blocked, Status::Working, Status::NeedsTest];
+        for want in order {
+            if let Some(i) = self.rows.iter().position(|r| r.status == want) {
+                self.selected = i;
+                self.sync_list_state();
+                return;
+            }
+        }
     }
 
     fn refresh(&mut self) {
@@ -170,6 +206,7 @@ impl App {
             pending,
             total_edits: s.edits.len(),
             last_prompt: s.last_prompt.clone(),
+            continue_cmd: s.continue_command(),
             edits: s.edits,
         })
     }
@@ -250,6 +287,109 @@ impl App {
     fn saved_flash(&self) -> bool {
         self.saved_until.map(|t| Instant::now() < t).unwrap_or(false)
     }
+
+    fn copied_flash(&self) -> bool {
+        self.copied_until.map(|t| Instant::now() < t).unwrap_or(false)
+    }
+
+    /// Copy the selected session's resume command to the clipboard.
+    fn copy_selected_continue(&mut self) {
+        self.copy_continue_for(self.selected);
+    }
+
+    fn copy_continue_for(&mut self, idx: usize) {
+        let Some(row) = self.rows.get(idx) else {
+            return;
+        };
+        if copy_to_clipboard(&row.continue_cmd) {
+            self.selected = idx;
+            self.sync_list_state();
+            self.copied_until = Some(Instant::now() + Duration::from_millis(1600));
+        }
+    }
+
+    /// Map a terminal cell to the row rendered under it, using the geometry
+    /// captured on the last frame.
+    fn row_at(&self, click_y: u16) -> Option<usize> {
+        hit_test(
+            click_y,
+            self.list_top,
+            self.list_height,
+            self.list_state.offset(),
+            &self.frame_item_heights,
+            &self.frame_item_rows,
+        )
+    }
+}
+
+/// Resolve a click's y-coordinate to a row index, walking the visible items from
+/// the scroll offset and summing their heights. Returns None for a click on a
+/// section header, the clear-collapse line, or empty space below the list.
+/// Pure arithmetic, split out from `App` so it can be tested without a terminal.
+fn hit_test(
+    click_y: u16,
+    list_top: u16,
+    list_height: u16,
+    offset: usize,
+    heights: &[u16],
+    rows: &[Option<usize>],
+) -> Option<usize> {
+    if click_y < list_top || click_y >= list_top + list_height {
+        return None;
+    }
+    let mut y = list_top;
+    for i in offset..heights.len() {
+        let h = heights[i];
+        if click_y >= y && click_y < y + h {
+            return rows.get(i).copied().flatten();
+        }
+        y += h;
+        if y >= list_top + list_height {
+            break;
+        }
+    }
+    None
+}
+
+/// Put text on the system clipboard. Tries pbcopy first (macOS), then falls
+/// back to an OSC 52 escape so it still works over SSH or on a bare terminal.
+fn copy_to_clipboard(text: &str) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    if let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() {
+        if let Some(stdin) = child.stdin.as_mut() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        if child.wait().map(|s| s.success()).unwrap_or(false) {
+            return true;
+        }
+    }
+
+    // OSC 52: ESC ] 52 ; c ; <base64> BEL -- ask the terminal to set the
+    // clipboard. Written straight to the tty; harmless if unsupported.
+    let seq = format!("\x1b]52;c;{}\x07", base64(text.as_bytes()));
+    std::io::stdout().write_all(seq.as_bytes()).is_ok()
+        && std::io::stdout().flush().is_ok()
+}
+
+/// Minimal standard-alphabet base64, to avoid a dependency for one escape code.
+fn base64(input: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    for chunk in input.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(A[(n >> 18 & 63) as usize] as char);
+        out.push(A[(n >> 12 & 63) as usize] as char);
+        out.push(if chunk.len() > 1 { A[(n >> 6 & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { A[(n & 63) as usize] as char } else { '=' });
+    }
+    out
 }
 
 fn main() -> std::io::Result<()> {
@@ -305,6 +445,10 @@ fn main() -> std::io::Result<()> {
     }
 
     let mut terminal = ratatui::init();
+    // Mouse capture lets a click copy a session's continue command. The cost is
+    // that click-drag no longer selects terminal text -- hold Option (iTerm2) or
+    // Shift to select while this runs.
+    let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let mut last_tick = Instant::now();
 
     let result = loop {
@@ -313,7 +457,9 @@ fn main() -> std::io::Result<()> {
         let selected = app.selected;
         let label = app.repo_label.clone();
         let saved = app.saved_flash();
+        let copied = app.copied_flash();
         let mut list_state = app.list_state.clone();
+        let mut geo = ui::FrameGeometry::default();
 
         let view = ui::View {
             rows: &rows,
@@ -324,11 +470,18 @@ fn main() -> std::io::Result<()> {
             hidden_stale: app.hidden_stale,
             clear_count: app.clear_count,
             show_clear: app.show_clear,
+            copied,
         };
-        if let Err(e) = terminal.draw(|f| ui::draw(f, &view, &mut list_state)) {
+        if let Err(e) = terminal.draw(|f| ui::draw(f, &view, &mut list_state, &mut geo)) {
             break Err(e);
         }
         app.list_state = list_state;
+        // Stash the frame's list geometry so a mouse click next iteration can be
+        // mapped to the row under the cursor.
+        app.frame_item_heights = geo.item_heights;
+        app.frame_item_rows = geo.item_rows;
+        app.list_top = geo.list_top;
+        app.list_height = geo.list_height;
 
         // Poll rather than block so the tick still fires on an idle keyboard.
         let timeout = TICK.saturating_sub(last_tick.elapsed());
@@ -341,6 +494,7 @@ fn main() -> std::io::Result<()> {
                     KeyCode::Char('a') => app.ack_selected(),
                     KeyCode::Char('u') => app.unack_selected(),
                     KeyCode::Char('A') => app.ack_all(),
+                    KeyCode::Char('y') => app.copy_selected_continue(),
                     KeyCode::Char('o') => {
                         app.show_all = !app.show_all;
                         app.refresh();
@@ -350,6 +504,17 @@ fn main() -> std::io::Result<()> {
                         app.refresh();
                     }
                     KeyCode::Char('r') => app.refresh(),
+                    _ => {}
+                },
+                Ok(Event::Mouse(m)) => match m.kind {
+                    // Click a row to copy its continue command (and select it).
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if let Some(idx) = app.row_at(m.row) {
+                            app.copy_continue_for(idx);
+                        }
+                    }
+                    MouseEventKind::ScrollDown => app.move_by(1),
+                    MouseEventKind::ScrollUp => app.move_by(-1),
                     _ => {}
                 },
                 Ok(_) => {}
@@ -365,6 +530,7 @@ fn main() -> std::io::Result<()> {
         }
     };
 
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
 }
@@ -431,5 +597,56 @@ fn git_root() -> Option<PathBuf> {
         if !dir.pop() {
             return None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Layout used by these tests: list starts at y=10, is 20 rows tall.
+    // Items (draw order): section header (h=2), card A (h=3), card B (h=3),
+    // section header (h=2), card C (h=3). Rows map: A->0, B->1, C->2.
+    fn fixture() -> (Vec<u16>, Vec<Option<usize>>) {
+        (
+            vec![2, 3, 3, 2, 3],
+            vec![None, Some(0), Some(1), None, Some(2)],
+        )
+    }
+
+    #[test]
+    fn click_lands_on_the_card_under_the_cursor() {
+        let (h, r) = fixture();
+        // y layout from top=10: header 10-11, A 12-14, B 15-17, header 18-19, C 20-22.
+        assert_eq!(hit_test(13, 10, 20, 0, &h, &r), Some(0)); // inside card A
+        assert_eq!(hit_test(16, 10, 20, 0, &h, &r), Some(1)); // inside card B
+        assert_eq!(hit_test(21, 10, 20, 0, &h, &r), Some(2)); // inside card C
+    }
+
+    #[test]
+    fn clicks_on_headers_and_outside_resolve_to_nothing() {
+        let (h, r) = fixture();
+        assert_eq!(hit_test(10, 10, 20, 0, &h, &r), None); // section header
+        assert_eq!(hit_test(18, 10, 20, 0, &h, &r), None); // second header
+        assert_eq!(hit_test(5, 10, 20, 0, &h, &r), None); // above the list
+        assert_eq!(hit_test(40, 10, 20, 0, &h, &r), None); // below the list
+    }
+
+    #[test]
+    fn scroll_offset_shifts_the_hit_test() {
+        let (h, r) = fixture();
+        // With offset=1, the first drawn item is card A at the list top (y=10).
+        // header 10-11? no -- offset skips item 0, so A(h=3) is 10-12, B 13-15...
+        assert_eq!(hit_test(11, 10, 20, 1, &h, &r), Some(0));
+        assert_eq!(hit_test(14, 10, 20, 1, &h, &r), Some(1));
+    }
+
+    #[test]
+    fn base64_matches_known_vectors() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
     }
 }

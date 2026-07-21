@@ -62,9 +62,23 @@ pub struct View<'a> {
     pub hidden_stale: usize,
     pub clear_count: usize,
     pub show_clear: bool,
+    pub copied: bool,
 }
 
-pub fn draw(f: &mut Frame, v: &View, list_state: &mut ListState) {
+/// Screen geometry of the last-drawn list, so a mouse click can be resolved to
+/// the row under it. Filled by `list`, read by the event loop.
+#[derive(Default)]
+pub struct FrameGeometry {
+    pub list_top: u16,
+    pub list_height: u16,
+    /// Per rendered item, in draw order: its height in rows.
+    pub item_heights: Vec<u16>,
+    /// Per rendered item: the `rows` index it maps to, or None for a section
+    /// header or the clear-collapse line.
+    pub item_rows: Vec<Option<usize>>,
+}
+
+pub fn draw(f: &mut Frame, v: &View, list_state: &mut ListState, geo: &mut FrameGeometry) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -76,7 +90,7 @@ pub fn draw(f: &mut Frame, v: &View, list_state: &mut ListState) {
         .split(f.area());
 
     header(f, chunks[0], v);
-    list(f, chunks[1], v, list_state);
+    list(f, chunks[1], v, list_state, geo);
     detail(f, chunks[2], v.rows.get(v.selected), v.now);
     footer(f, chunks[3], v);
     let _ = chunks;
@@ -148,8 +162,13 @@ fn header(f: &mut Frame, area: Rect, v: &View) {
     );
 }
 
-fn list(f: &mut Frame, area: Rect, v: &View, list_state: &mut ListState) {
+fn list(f: &mut Frame, area: Rect, v: &View, list_state: &mut ListState, geo: &mut FrameGeometry) {
     let width = area.width.saturating_sub(1) as usize;
+
+    geo.list_top = area.y;
+    geo.list_height = area.height;
+    geo.item_heights.clear();
+    geo.item_rows.clear();
 
     if v.rows.is_empty() && v.clear_count == 0 {
         let empty = Paragraph::new("No sessions with repo edits yet.")
@@ -162,22 +181,30 @@ fn list(f: &mut Frame, area: Rect, v: &View, list_state: &mut ListState) {
     let mut selected_item = 0usize;
     let mut current: Option<Status> = None;
 
+    // Push an item while recording its height and which row (if any) it maps to,
+    // so a later mouse click can be resolved to the row under the cursor.
+    let mut push = |items: &mut Vec<ListItem<'static>>, item: ListItem<'static>, row: Option<usize>| {
+        geo.item_heights.push(item.height() as u16);
+        geo.item_rows.push(row);
+        items.push(item);
+    };
+
     for (i, r) in v.rows.iter().enumerate() {
         if current != Some(r.status) {
             let n = v.rows.iter().filter(|x| x.status == r.status).count();
-            items.push(section_header(r.status, n, width));
+            push(&mut items, section_header(r.status, n, width), None);
             current = Some(r.status);
         }
         if i == v.selected {
             selected_item = items.len();
         }
-        items.push(card(r, i == v.selected, v.now, width));
+        push(&mut items, card(r, i == v.selected, v.now, width), Some(i));
     }
 
     // Idle sessions carry no action, so they collapse to one line unless asked
     // for. This is the difference between a scannable window and a wall.
     if !v.show_clear && v.clear_count > 0 {
-        items.push(ListItem::new(vec![
+        let collapse = ListItem::new(vec![
             Line::raw(""),
             Line::from(vec![
                 Span::raw(" "),
@@ -187,7 +214,8 @@ fn list(f: &mut Frame, area: Rect, v: &View, list_state: &mut ListState) {
                 ),
                 Span::styled("  — press c to show", Style::default().fg(DIM)),
             ]),
-        ]));
+        ]);
+        push(&mut items, collapse, None);
     }
 
     list_state.select(if v.rows.is_empty() {
@@ -386,6 +414,18 @@ fn detail(f: &mut Frame, area: Rect, row: Option<&Row>, now: i64) {
         ]));
     }
 
+    // The resume command, always present -- this is what lets a dropped thread
+    // be picked back up. y (or a click) copies it.
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("continue ", Style::default().fg(DIM)),
+        Span::styled("[y / click] ", Style::default().fg(BLUE)),
+        Span::styled(
+            row.continue_cmd.clone(),
+            Style::default().fg(Color::Rgb(190, 200, 210)),
+        ),
+    ]));
+
     f.render_widget(
         Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
         area,
@@ -404,6 +444,7 @@ fn footer(f: &mut Frame, area: Rect, v: &View) {
     spans.extend(key("a", "ack"));
     spans.extend(key("u", "unack"));
     spans.extend(key("A", "ack all"));
+    spans.extend(key("y", "copy continue"));
     spans.extend(key("c", if v.show_clear { "hide clear" } else { "show clear" }));
     spans.extend(key("q", "quit"));
 
@@ -413,7 +454,14 @@ fn footer(f: &mut Frame, area: Rect, v: &View) {
             Style::default().fg(DIM),
         ));
     }
-    if v.saved {
+    // The copied flash wins the corner when both fire -- it is the action the
+    // user just took and wants confirmed.
+    if v.copied {
+        spans.push(Span::styled(
+            "continue command copied",
+            Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
+        ));
+    } else if v.saved {
         spans.push(Span::styled(
             "saved",
             Style::default().fg(GREEN).add_modifier(Modifier::BOLD),

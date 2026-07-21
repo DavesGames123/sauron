@@ -142,6 +142,10 @@ pub struct Session {
     /// tool_use ids of any kind with no tool_result yet. Combined with a silent
     /// log this is the only available trace of a pending permission prompt.
     pub pending_tools: BTreeSet<String>,
+    /// Working directory the session ran in, from the log's `cwd` field. Needed
+    /// to resume it: `claude --resume` keys the session to a project derived
+    /// from cwd, so the resume must run from the same directory.
+    pub cwd: Option<String>,
     /// Repo-relative path -> epoch millis of its most recent write by this session.
     pub edits: BTreeMap<String, i64>,
 }
@@ -151,6 +155,21 @@ impl Session {
     pub fn short_id(&self) -> &str {
         let n = self.id.len().min(8);
         &self.id[..n]
+    }
+
+    /// Shell command to resume this session where it was dropped.
+    ///
+    /// `claude --resume <id>` reattaches by session id, but it resolves the
+    /// project from the current directory, so it must be run from the session's
+    /// original cwd -- hence the `cd` prefix when we know it. The id is the full
+    /// uuid (the jsonl filename), not the short form.
+    pub fn continue_command(&self) -> String {
+        match &self.cwd {
+            Some(dir) if !dir.is_empty() => {
+                format!("cd {} && claude --resume {}", shell_quote(dir), self.id)
+            }
+            _ => format!("claude --resume {}", self.id),
+        }
     }
 
     /// Title if the session has earned one, else a trimmed last prompt, else the id.
@@ -327,6 +346,19 @@ pub fn collapse_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Single-quote a path for a POSIX shell so a directory with spaces or other
+/// metacharacters survives being pasted into a terminal. Any embedded single
+/// quote is closed, escaped, and reopened -- the standard `'\''` dance.
+pub fn shell_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '~'))
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 pub fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -353,6 +385,34 @@ mod tests {
         assert!(parse_rfc3339_ms("2026-07-21T17:59:10Z").is_some());
         // Garbage is rejected rather than silently zeroed.
         assert!(parse_rfc3339_ms("not-a-timestamp").is_none());
+    }
+
+    #[test]
+    fn continue_command_targets_the_session_and_its_cwd() {
+        let mut s = Session::default();
+        s.id = "6c6f86f2-1234".into();
+        // No cwd: bare resume by id.
+        assert_eq!(s.continue_command(), "claude --resume 6c6f86f2-1234");
+        // With cwd: cd first, so resume resolves the right project.
+        s.cwd = Some("/Users/d/Downloads/barnes-hut".into());
+        assert_eq!(
+            s.continue_command(),
+            "cd /Users/d/Downloads/barnes-hut && claude --resume 6c6f86f2-1234"
+        );
+        // A path with a space is quoted so it survives a paste.
+        s.cwd = Some("/Users/d/My Projects/x".into());
+        assert_eq!(
+            s.continue_command(),
+            "cd '/Users/d/My Projects/x' && claude --resume 6c6f86f2-1234"
+        );
+    }
+
+    #[test]
+    fn shell_quote_escapes_only_when_needed() {
+        assert_eq!(shell_quote("/plain/path-1.rs"), "/plain/path-1.rs");
+        assert_eq!(shell_quote("has space"), "'has space'");
+        // Embedded single quote is closed/escaped/reopened.
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
     }
 
     #[test]

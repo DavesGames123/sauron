@@ -131,17 +131,13 @@ fn eye_tower(pose: Pose, pupil: usize, flicker: usize) -> [Vec<Cell>; 5] {
     let mut r1 = blank_row(EYE_W);
     r1[1] = ('█', stone);
     r1[2] = ('▟', red);
-    for c in 3..10 {
-        r1[c] = ('█', flame);
-    }
+    r1[3..10].fill(('█', flame));
     r1[10] = ('▙', red);
     r1[11] = ('█', stone);
     let mut r3 = blank_row(EYE_W);
     r3[1] = ('█', stone);
     r3[2] = ('▜', red);
-    for c in 3..10 {
-        r3[c] = ('█', flame);
-    }
+    r3[3..10].fill(('█', flame));
     r3[10] = ('▛', red);
     r3[11] = ('█', stone);
 
@@ -154,11 +150,7 @@ fn eye_tower(pose: Pose, pupil: usize, flicker: usize) -> [Vec<Cell>; 5] {
     r2[2] = ('▐', red);
     r2[10] = ('▌', red);
     match pose {
-        Pose::Blink => {
-            for c in 3..10 {
-                r2[c] = ('━', lid);
-            }
-        }
+        Pose::Blink => r2[3..10].fill(('━', lid)),
         _ => {
             for i in 0..7usize {
                 let col = 3 + i;

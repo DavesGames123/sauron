@@ -24,7 +24,7 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::ui::{DIM, EMBER, FLAME, FLARE, RUNE};
+use crate::ui::{DIM, FLAME, FLARE, RUNE};
 
 /// Rows the scene occupies (not counting the status line above it).
 pub const HEIGHT: u16 = 5;
@@ -34,8 +34,9 @@ const HOBBIT: Color = Color::Rgb(150, 190, 140); // Frodo & Sam
 const GOLLUM_C: Color = Color::Rgb(150, 172, 150); // the pale creeping thing
 const GROUND: Color = Color::Rgb(66, 70, 80); // the horizon the walkers cross
 const STONE: Color = Color::Rgb(92, 96, 112); // the black tower of Barad-dûr
-const HOT: Color = Color::Rgb(255, 236, 150); // white-hot: flame tips and the Eye's core
+const HOT: Color = Color::Rgb(255, 236, 150); // white-hot: flame tips and sparks
 const RED: Color = Color::Rgb(200, 54, 20); // deep red: the cool outer edge of the fire
+const PUPIL: Color = Color::Rgb(34, 14, 10); // near-black: the cute pupil, the focal point
 
 // Timeline: one walk per 26s, crossing over ~7.5s, a long calm idle the rest.
 const PERIOD: u64 = 26_000;
@@ -103,7 +104,7 @@ fn row_to_line(row: Vec<Cell>) -> Line<'static> {
 fn eye_tower(pose: Pose, pupil: usize, flicker: usize) -> [Vec<Cell>; 5] {
     let bright = pose == Pose::Wide; // when it flares, every band shifts hotter
     let stone = Style::default().fg(STONE);
-    let dark = Style::default().fg(EMBER);
+    let dark = Style::default().fg(PUPIL);
     let lid = Style::default().fg(RUNE);
     let hot = Style::default().fg(HOT);
     let flare = Style::default().fg(if bright { HOT } else { FLARE });
@@ -144,8 +145,9 @@ fn eye_tower(pose: Pose, pupil: usize, flicker: usize) -> [Vec<Cell>; 5] {
     r3[10] = ('▛', red);
     r3[11] = ('█', stone);
 
-    // The Eye's middle -- the hottest band. Iris (cols 3..=9) runs a gradient
-    // from a white-hot core out to red edges; the pupil is a dark hole in it.
+    // The Eye's middle. The fire glows brightest toward the rim and stays calm
+    // in the middle, so the dark pupil -- the focal point -- is never washed out
+    // by a hot core sitting right where it lives.
     let mut r2 = blank_row(EYE_W);
     r2[1] = ('█', stone);
     r2[11] = ('█', stone);
@@ -161,10 +163,9 @@ fn eye_tower(pose: Pose, pupil: usize, flicker: usize) -> [Vec<Cell>; 5] {
             for i in 0..7usize {
                 let col = 3 + i;
                 let heat = match (col as i32 - 6).abs() {
-                    0 => hot,
-                    1 => flare,
-                    2 => flame,
-                    _ => red,
+                    0 | 1 => flame, // calm orange hugging the pupil
+                    _ => flare,     // a gentle glow toward the rim; the white-hot
+                                    // lives up in the crown, not next to the pupil
                 };
                 let is_pupil = if pose == Pose::Wide {
                     (2..=4).contains(&i)

@@ -66,6 +66,8 @@ pub struct Row {
     pub pending: Vec<String>,
     pub total_edits: usize,
     pub last_prompt: Option<String>,
+    /// One of sauron's own orcs (a single-shot maintenance agent), not a hobbit.
+    pub is_orc: bool,
     /// `cd <cwd> && claude --resume <id>` -- reattach a dropped thread.
     pub continue_cmd: String,
     pub edits: BTreeMap<String, i64>,
@@ -236,6 +238,7 @@ impl App {
             pending,
             total_edits: s.edits.len(),
             last_prompt: s.last_prompt.clone(),
+            is_orc: s.is_orc,
             continue_cmd: s.continue_command(),
             // Drop the per-file timestamp here -- it did its job ordering the
             // previews during the fold; the card only needs the lines.

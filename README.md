@@ -124,14 +124,20 @@ sauron workspace 5 --orcs 2       # 5 hobbits + 2 orcs (see below)
 
 ### 👹 orcs — the maintenance swarm
 
-`--orcs N` looses **N single-shot maintenance agents** into the *cold* corners of
-the repo — the largest source files **no active session is touching** and nothing
-has dirtied in git. Each orc gets one file and makes a focused pass: decompose it
-if it's oversized, tighten structure, and clear its warnings, tests staying
-green. They ride the right column beneath `sauron`, which watches them like any
-other session. Where the **hobbits** do your directed quests, the orcs toil on
-the plumbing you'd never get to — and they only ever take what's safe, so they
-can't collide with a hobbit mid-edit.
+`--orcs N` stages **N single-shot maintenance agents** in the right column, aimed
+at the *cold* corners of the repo — the largest source files **no active session
+is touching** and nothing has dirtied in git. Each orc gets one file with a
+focused brief: decompose it if it's oversized (**splitting it into a
+well-documented nested module/filetree** where that's the natural shape), tighten
+what remains, and clear its warnings — tests staying green.
+
+- **They don't start on their own.** The command is *typed into each orc pane but
+  not run* — you review the target and press **Enter** to loose it.
+- **They're marked distinct.** An orc session wears a green **`orc`** badge in the
+  TUI, so you can tell sauron's own maintenance work apart from the **hobbits**
+  doing your directed quests.
+- **They only take what's safe**, so they can never collide with a hobbit
+  mid-edit.
 
 `<project>` is a directory (path, `~`, `.`) **or** a short alias you've saved
 into workspace memory:

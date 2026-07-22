@@ -45,6 +45,11 @@ pub const STALL_AFTER_MS: i64 = 45_000;
 /// completed sessions out of the attention band.
 pub const RECENT_STOP_MS: i64 = 20 * 60 * 1000;
 
+/// A phrase every orc's launch prompt carries, so sauron can recognise its own
+/// maintenance agents in the session list and mark them distinct. Both the orc
+/// prompt (`workspace::orc_command`) and the log folds match on this.
+pub const ORC_MARKER: &str = "no other agent is touching it";
+
 /// Why a session is waiting on the user, most urgent first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BlockedReason {
@@ -208,6 +213,10 @@ pub struct Session {
     /// agent rather than on you -- the difference between `Delegated` and the
     /// "stopped, your move" `AwaitingInput`.
     pub agent_launched_ms: i64,
+    /// True once a prompt carrying `ORC_MARKER` is seen -- this session is one of
+    /// sauron's own orcs (a single-shot maintenance agent), so the UI marks it
+    /// distinct from the hobbits doing your directed work.
+    pub is_orc: bool,
     /// Repo-relative path -> epoch millis of its most recent write by this session.
     pub edits: BTreeMap<String, i64>,
     /// Repo-relative path -> `(timestamp, lines)` of the most recent text an

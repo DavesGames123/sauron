@@ -350,6 +350,10 @@ fn applescript(
 
     let left_list = as_list(&left);
     let right_list = as_list(&right);
+    // The orcs are the leading right-column commands. They are staged (typed but
+    // not run) so you review the target and press Enter to loose each one -- they
+    // never begin refactoring the moment the window opens.
+    let orc_count = orc_cmds.len();
 
     format!(
         r#"tell application "iTerm2"
@@ -377,13 +381,19 @@ tell application "iTerm2"
   tell leftTop to set rTop to (split vertically with default profile)
   tell rTop to write text "cd {repo} && {sauron_exe} --{sauron_flag}"
   set rightPanes to {{rTop}}
+  set orcCount to {orc_count}
   repeat with i from 1 to (count of rightCmds)
     set tallest to item 1 of rightPanes
     repeat with p in rightPanes
       if (rows of p) > (rows of tallest) then set tallest to contents of p
     end repeat
     tell tallest to set newP to (split horizontally with default profile)
-    tell newP to write text (item i of rightCmds)
+    -- Orcs (the first orcCount) are staged, not run: typed in, awaiting Enter.
+    if i is less than or equal to orcCount then
+      tell newP to write text (item i of rightCmds) newline no
+    else
+      tell newP to write text (item i of rightCmds)
+    end if
     set end of rightPanes to newP
   end repeat
 
@@ -463,8 +473,11 @@ fn is_code(path: &str) -> bool {
 /// the shell and free of both quote kinds, so it survives the AppleScript
 /// double-quoted string it is embedded in.
 fn orc_command(repo: &str, target: &str, agent: Agent) -> String {
+    // The prompt carries model::ORC_MARKER so sauron recognises the session as
+    // one of its own orcs and marks it distinct in the TUI.
     let prompt = format!(
-        "This file is safe to refactor -- no other agent is touching it. Make one focused pass on {target}: decompose it if it is overly large, tighten its structure, and clear any compiler or linter warnings it produces. Keep behaviour identical and every test passing, and prefer to touch only this file."
+        "This file is safe to refactor -- {marker}. Make one focused pass on {target}: decompose it if it is overly large -- split it into a well-organised, clearly documented nested module / filetree where that is the natural structure -- tighten what remains, and clear any compiler or linter warnings it produces. Keep behaviour identical and every test passing; confine the change to {target} and the files you split out of it.",
+        marker = crate::model::ORC_MARKER,
     );
     format!("cd {repo} && {}", agent.run_cmd(&prompt))
 }
@@ -515,6 +528,9 @@ mod tests {
         // The orc rides in the right column, and a shell still trails it.
         assert!(s.contains("set rightCmds to {\"cd /repo && claude 'This file is safe"));
         assert!(s.contains("'This file is safe to refactor"));
+        // …and it is STAGED, not run: one orc, typed in but awaiting Enter.
+        assert!(s.contains("set orcCount to 1"));
+        assert!(s.contains("write text (item i of rightCmds) newline no"));
     }
 
     #[test]

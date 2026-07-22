@@ -106,6 +106,9 @@ pub fn fold(session: &mut Session, v: &Value, repo: &Path) {
                 session.turn_complete = false;
                 let text = message_text(item);
                 let t = text.trim();
+                if t.contains(crate::model::ORC_MARKER) {
+                    session.is_orc = true;
+                }
                 if !t.is_empty() {
                     session.last_prompt = Some(t.to_string());
                 }

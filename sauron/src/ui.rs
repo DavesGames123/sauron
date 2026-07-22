@@ -34,6 +34,7 @@ const AMBER: Color = Color::Rgb(255, 176, 66); // awaiting acknowledgement
 const CYAN: Color = Color::Rgb(86, 205, 226); // agent still working
 const GREEN: Color = Color::Rgb(126, 200, 120); // nothing outstanding
 const INDIGO: Color = Color::Rgb(150, 140, 235); // delegated to a background agent
+const ORC: Color = Color::Rgb(122, 158, 74); // one of sauron's own maintenance orcs
 const BLUE: Color = Color::Rgb(120, 170, 255); // chrome / repo identity
 pub(crate) const DIM: Color = Color::Rgb(88, 94, 104);
 const INK: Color = Color::Rgb(18, 20, 24); // text on a filled badge
@@ -436,15 +437,28 @@ fn card(row: &Row, selected: bool, now: i64, width: usize) -> ListItem<'static> 
     };
 
     let age = ago(row.last_activity, now);
-    let name_room = width.saturating_sub(age.chars().count() + 12).max(16);
+    // A green "orc" badge marks sauron's own maintenance agents, distinct from
+    // the hobbits. It sits ahead of the name so it never gets truncated away.
+    let orc_room = if row.is_orc { 6 } else { 0 };
+    let name_room = width
+        .saturating_sub(age.chars().count() + 12 + orc_room)
+        .max(12);
 
-    let first = Line::from(vec![
+    let mut first_spans = vec![
         marker.clone(),
         Span::styled(format!("{} ", glyph_of(row.status)), Style::default().fg(color)),
-        Span::styled(truncate(&row.name, name_room), title_style),
-        Span::raw("  "),
-        Span::styled(age, Style::default().fg(DIM)),
-    ]);
+    ];
+    if row.is_orc {
+        first_spans.push(Span::styled(
+            " orc ",
+            Style::default().fg(INK).bg(ORC).add_modifier(Modifier::BOLD),
+        ));
+        first_spans.push(Span::raw(" "));
+    }
+    first_spans.push(Span::styled(truncate(&row.name, name_room), title_style));
+    first_spans.push(Span::raw("  "));
+    first_spans.push(Span::styled(age, Style::default().fg(DIM)));
+    let first = Line::from(first_spans);
 
     // A clear session has nothing to say beyond its name -- one line, no files.
     if row.status == Status::Clear {

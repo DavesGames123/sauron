@@ -246,6 +246,9 @@ pub(crate) fn fold_record(session: &mut Session, v: &Value, repo_root: &Path) {
         }
         "last-prompt" => {
             if let Some(p) = v.get("lastPrompt").and_then(|p| p.as_str()) {
+                if p.contains(crate::model::ORC_MARKER) {
+                    session.is_orc = true;
+                }
                 session.last_prompt = Some(p.to_string());
             }
         }
@@ -604,6 +607,28 @@ mod tests {
             Some(vec!["# Title".to_string(), "".to_string(), "body line".to_string()]),
             "no patch -> new content, blank edges trimmed"
         );
+    }
+
+    #[test]
+    fn an_orc_launch_prompt_marks_the_session() {
+        let root = Path::new("/repo");
+        let mut s = Session::default();
+        assert!(!s.is_orc);
+        // A hobbit's prompt leaves it unmarked.
+        fold_record(
+            &mut s,
+            &json!({"type":"last-prompt","lastPrompt":"add a settings screen"}),
+            root,
+        );
+        assert!(!s.is_orc);
+        // An orc's prompt carries the marker -> tagged, and it sticks.
+        fold_record(
+            &mut s,
+            &json!({"type":"last-prompt",
+                    "lastPrompt":"This file is safe to refactor -- no other agent is touching it. Make one pass on x.rs"}),
+            root,
+        );
+        assert!(s.is_orc);
     }
 
     #[test]

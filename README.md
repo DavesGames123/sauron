@@ -4,7 +4,7 @@
 
 ### Know what your agents changed — before you ship it.
 
-A read-only sidecar for running **many [Claude Code](https://claude.com/claude-code) agents at once** and never losing track of which ones left work you haven't tested.
+A read-only sidecar for running **many coding agents at once** — [Claude Code](https://claude.com/claude-code) and [OpenAI Codex](https://github.com/openai/codex) — and never losing track of which ones left work you haven't tested.
 
 <br>
 
@@ -164,49 +164,86 @@ a restored window keeps working. Registry lives at `~/.claude/sauron/workspaces`
 
 ---
 
-## 🤖 Agents — Claude Code & Codex
+## 🤖 Agents — Claude Code, Codex, and beyond
 
-sauron watches **Claude Code** by default. It also reads **OpenAI Codex** rollouts
-(`~/.codex/sessions`) — pick the agent with a flag, `$SAURON_AGENT`, or let it
-auto-detect from whichever has logs for the repo:
+sauron isn't tied to one agent. Everything downstream — the status model, the
+cards, workspace, orcs — is agent-agnostic; only *where the logs live* and *how
+one record folds into a session* differ, behind a small `Agent` seam
+(`src/agent.rs`). **Claude Code** is the default and fully supported; **OpenAI
+Codex** is supported too; adding a third is a localized change.
+
+### Choosing an agent
+
+Pick with a flag, the `$SAURON_AGENT` env var, or let it auto-detect — first match wins:
+
+| Precedence | Source | Example |
+|:--|:--|:--|
+| 1 | flag | `sauron --codex`, `sauron --claude` |
+| 2 | env | `SAURON_AGENT=codex sauron` |
+| 3 | auto-detect | whichever agent has logs for this repo |
+| 4 | default | Claude Code |
+
+The choice flows everywhere:
 
 ```bash
-sauron                 # auto-detect (Claude if it has logs, else Codex)
-sauron --codex         # force Codex
-SAURON_AGENT=codex sauron
-sauron workspace 5 --codex   # a Codex cockpit: panes run `codex`, orcs `codex exec`
+sauron                        # watch — auto-detect the agent
+sauron --codex                # watch Codex sessions
+sauron workspace 5 --codex    # a Codex cockpit: hobbit panes run `codex`,
+                              #   the watcher runs `sauron --codex`
+sauron workspace 5 --codex --orcs 2   # …and orcs run `codex exec`
 ```
 
-Everything downstream — the status model, the cards, workspace, orcs — is
-agent-agnostic; only *where the logs are* and *how one record folds into a
-session* differ per agent, behind a small `Agent` seam (`src/agent.rs`).
+### Codex specifics
 
-> **Codex support is best-effort and unverified** — it was written against the
-> documented rollout format on a machine with no Codex install. It's defensive
-> (degrades rather than crashes), but if edits or prompts look off, one real
-> rollout `.jsonl` pins the exact field names. Reports welcome.
+sauron reads Codex rollouts from `~/.codex/sessions/**/*.jsonl`, matching them to
+the repo by the `cwd` recorded in each rollout, and folds messages into
+prompt/turn state and `apply_patch` envelopes into the write-set.
+
+> ⚠️ **Codex support is best-effort and unverified.** It was written against the
+> documented rollout format on a machine with no Codex install. It's defensive —
+> it degrades rather than crashes — but if edits or prompts look off, **one real
+> `~/.codex/sessions/**/rollout-*.jsonl`** pins the exact field names. The fix is
+> isolated to `src/codex.rs`; reports very welcome.
+
+### Adding another agent
+
+Aider, Gemini CLI, Cursor, your own — see **[docs/AGENTS.md](docs/AGENTS.md)** for
+the seam and a step-by-step. In short: add an `Agent` variant, give it a spawn
+command and a log reader (session discovery + a `fold` that maps records onto the
+shared `Session`), and the entire UI, workspace, and orc machinery come for free.
 
 ---
 
 ## 🔍 How it reads sessions
 
-Claude Code encodes a project path by swapping separators for dashes:
+Each agent stores sessions its own way. **Claude Code** encodes a project path by
+swapping separators for dashes:
 
 ```
 /Users/you/code/my-repo   →   ~/.claude/projects/-Users-you-code-my-repo/
 ```
 
-sauron folds each session's `file-history-delta` records into a per-session
+**Codex** writes dated rollouts under `~/.codex/sessions/`, tagged with the `cwd`
+they ran in. Either way, sauron folds each session's records into a per-session
 edit set, subtracts what you've acknowledged, and shows the remainder.
 Acknowledgements live in a small state file, so restarting never loses your
-place.
+place. It re-tails every two seconds, **writes nothing to your repo**, and
+**never talks to a running agent**.
 
 ---
 
 ## 🗂️ Layout
 
 ```
-sauron/   ·  Rust crate — the TUI sidecar and the `workspace` launcher
+sauron/src/
+  agent.rs      ·  the agent seam — selection + spawn/log hooks
+  scan.rs       ·  incremental log tailer + the Claude Code reader
+  codex.rs      ·  the Codex rollout reader
+  model.rs      ·  session model, status classification (agent-agnostic)
+  ui.rs         ·  the TUI
+  scene.rs      ·  the animated Eye
+  workspace.rs  ·  the `sauron workspace` launcher (hobbits + orcs)
+docs/AGENTS.md  ·  using Codex, and adding another agent
 ```
 
 <div align="center">

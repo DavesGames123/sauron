@@ -452,6 +452,23 @@ fn in_flight_tasks(repo_root: PathBuf) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Repo-relative paths an *active* session is touching -- working, delegated,
+/// blocked, or holding untested edits. This is the "hot" set an orc must steer
+/// clear of, so its single-shot refactor never collides with a hobbit's work.
+fn hot_files(repo_root: PathBuf) -> std::collections::BTreeSet<String> {
+    let repo_root = repo_root.canonicalize().unwrap_or(repo_root);
+    let mut hot = std::collections::BTreeSet::new();
+    for r in &App::new(repo_root).rows {
+        if matches!(
+            r.status,
+            Status::Working | Status::Delegated | Status::Blocked | Status::NeedsTest
+        ) {
+            hot.extend(r.edits.keys().cloned());
+        }
+    }
+    hot
+}
+
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 

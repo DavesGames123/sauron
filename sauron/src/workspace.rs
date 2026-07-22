@@ -15,8 +15,9 @@
 //!   fn applescript      -- the iTerm layout script
 //!   fn osascript        -- pipe the script to `osascript`
 
+use std::collections::BTreeSet;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::scan::home;
@@ -54,16 +55,36 @@ pub fn run(args: &[String]) -> std::io::Result<()> {
         _ => {}
     }
 
-    // Launch args, order-independent:  [init] [N] [project]. A purely-numeric
-    // arg is the pane count; anything else is the project.
-    let rest: &[String] = if args.first().map(|s| s.as_str()) == Some("init") {
-        &args[1..]
-    } else {
-        args
-    };
+    // Pull `--orcs N` (or `--orcs=N`) out first: N single-shot maintenance agents
+    // that refactor / decompose / de-warn the cold, uncontested parts of the repo
+    // while the hobbits do the directed work. The rest is [init] [N] [project],
+    // order-independent -- a purely-numeric arg is the pane count, else the project.
+    let mut orcs = 0usize;
+    let mut pos: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--orcs" {
+            match args.get(i + 1).and_then(|s| s.parse::<usize>().ok()) {
+                Some(n) => orcs = n,
+                None => {
+                    eprintln!("usage: sauron workspace [N] [project] --orcs <N>");
+                    std::process::exit(2);
+                }
+            }
+            i += 2;
+        } else if let Some(rest) = a.strip_prefix("--orcs=") {
+            orcs = rest.parse().unwrap_or(0);
+            i += 1;
+        } else {
+            pos.push(a);
+            i += 1;
+        }
+    }
+    let pos: &[&str] = if pos.first() == Some(&"init") { &pos[1..] } else { &pos };
     let mut n_arg: Option<usize> = None;
     let mut project: Option<&str> = None;
-    for a in rest {
+    for a in pos {
         match a.parse::<usize>() {
             Ok(n) => n_arg = Some(n),
             Err(_) => project = Some(a),
@@ -104,21 +125,48 @@ pub fn run(args: &[String]) -> std::io::Result<()> {
     let sauron_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sauron"));
     let repo_s = repo.to_string_lossy().into_owned();
 
+    // Assign each orc a cold target: the largest source files no active session
+    // is touching. Fewer safe targets than asked -> fewer orcs (nothing else is
+    // safe to hand out without risking a collision with a hobbit).
+    let orc_targets = if orcs > 0 {
+        let hot = crate::hot_files(repo.clone());
+        let targets = cold_targets(&repo, &hot, orcs);
+        if targets.len() < orcs {
+            eprintln!(
+                "sauron workspace: only {} cold file(s) safe for orcs (asked {})",
+                targets.len(),
+                orcs
+            );
+        }
+        targets
+    } else {
+        Vec::new()
+    };
+    let orc_cmds: Vec<String> = orc_targets.iter().map(|t| orc_command(&repo_s, t)).collect();
+
     // Dry run: report the plan and stop, before touching iTerm (used by tests
     // and handy for "what would `sauron workspace X` actually open?").
     if std::env::var_os("WORKSPACE_DRYRUN").is_some() {
         println!("REPO={repo_s}");
         println!("TOTAL={total}");
         println!("SAURON={}", sauron_exe.display());
+        for t in &orc_targets {
+            println!("ORC={t}");
+        }
         return Ok(());
     }
 
-    let script = applescript(&repo_s, &sauron_exe.to_string_lossy(), total, &work);
+    let script = applescript(&repo_s, &sauron_exe.to_string_lossy(), total, &work, &orc_cmds);
     osascript(&script)?;
 
     let resumed = total.min(work.len());
+    let orc_note = if orc_cmds.is_empty() {
+        String::new()
+    } else {
+        format!(", {} orc(s) loosed on cold files", orc_cmds.len())
+    };
     println!(
-        "sauron workspace: opened {total}-pane layout on a new Space ({resumed} resumed working task(s), {} new) — repo: {repo_s}",
+        "sauron workspace: opened {total}-pane layout on a new Space ({resumed} resumed working task(s), {} new{orc_note}) — repo: {repo_s}",
         total - resumed
     );
     Ok(())
@@ -245,19 +293,48 @@ fn default_repo() -> PathBuf {
 // iTerm layout
 // ---------------------------------------------------------------------------
 
+/// Quote a shell command for embedding in an AppleScript string list. Repo/exe
+/// paths and commands are assumed double-quote-free (the shell version assumed
+/// the same), so they drop straight in.
+fn as_list(cmds: &[String]) -> String {
+    cmds.iter()
+        .map(|c| format!("\"{c}\""))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Build the AppleScript that opens the window, fullscreens it onto its own
-/// Space, and lays out the panes. Repo/exe paths are assumed quote-free (as the
-/// shell version assumed), so they drop straight into the double-quoted strings.
-fn applescript(repo: &str, sauron_exe: &str, total: usize, work: &[(String, String)]) -> String {
-    let mut cmds = Vec::with_capacity(total);
-    for i in 0..total {
-        if i < work.len() {
-            cmds.push(format!("\"cd {repo} && claude --resume {}\"", work[i].0));
-        } else {
-            cmds.push(format!("\"cd {repo} && claude\""));
-        }
-    }
-    let cmds_list = cmds.join(", ");
+/// Space, and lays out the panes: the left column is one hobbit pane per
+/// `total`, and the right column is sauron on top with the orcs stacked beneath
+/// it (plus a shell). Both columns split the currently-tallest pane each step so
+/// they stay balanced rather than shrinking geometrically.
+fn applescript(
+    repo: &str,
+    sauron_exe: &str,
+    total: usize,
+    work: &[(String, String)],
+    orc_cmds: &[String],
+) -> String {
+    // Left column: resume each in-flight session, bare `claude` for the rest.
+    let left: Vec<String> = (0..total)
+        .map(|i| match work.get(i) {
+            Some((id, _)) => format!("cd {repo} && claude --resume {id}"),
+            None => format!("cd {repo} && claude"),
+        })
+        .collect();
+
+    // Right column beneath sauron: the orcs, then a shell. With no orcs, two
+    // plain shells, as before.
+    let right: Vec<String> = if orc_cmds.is_empty() {
+        vec![format!("cd {repo}"), format!("cd {repo}")]
+    } else {
+        let mut v = orc_cmds.to_vec();
+        v.push(format!("cd {repo}"));
+        v
+    };
+
+    let left_list = as_list(&left);
+    let right_list = as_list(&right);
 
     format!(
         r#"tell application "iTerm2"
@@ -275,30 +352,36 @@ delay 1.5
 tell application "iTerm2"
   set t to current tab of w
   set leftTop to current session of t
-  set cmds to {{{cmds_list}}}
+  set leftCmds to {{{left_list}}}
+  set rightCmds to {{{right_list}}}
 
-  -- Carve the right column off the left, then stack it into 3 panes.
+  -- Carve the right column off the left; sauron on top, the rest stacked below.
+  -- Split the CURRENTLY-TALLEST pane in a column each step (not the newest), so
+  -- panes stay balanced -- repeatedly splitting the newest drives it below
+  -- iTerm2's minimum height, which throws and aborts the remaining splits.
   tell leftTop to set rTop to (split vertically with default profile)
-  tell rTop    to set rMid to (split horizontally with default profile)
-  tell rMid    to set rBot to (split horizontally with default profile)
-
   tell rTop to write text "cd {repo} && {sauron_exe}"
-  tell rMid to write text "cd {repo}"
-  tell rBot to write text "cd {repo}"
+  set rightPanes to {{rTop}}
+  repeat with i from 1 to (count of rightCmds)
+    set tallest to item 1 of rightPanes
+    repeat with p in rightPanes
+      if (rows of p) > (rows of tallest) then set tallest to contents of p
+    end repeat
+    tell tallest to set newP to (split horizontally with default profile)
+    tell newP to write text (item i of rightCmds)
+    set end of rightPanes to newP
+  end repeat
 
-  -- Left column: one pane per command. Split the CURRENTLY-TALLEST left pane
-  -- each iteration (not the newest), so panes stay balanced instead of shrinking
-  -- geometrically -- repeatedly splitting the newest pane drives it below iTerm2's
-  -- minimum height, which throws and aborts the remaining splits.
-  tell leftTop to write text (item 1 of cmds)
+  -- Left column: one pane per hobbit command.
+  tell leftTop to write text (item 1 of leftCmds)
   set leftPanes to {{leftTop}}
-  repeat with i from 2 to (count of cmds)
+  repeat with i from 2 to (count of leftCmds)
     set tallest to item 1 of leftPanes
     repeat with p in leftPanes
       if (rows of p) > (rows of tallest) then set tallest to contents of p
     end repeat
     tell tallest to set newP to (split horizontally with default profile)
-    tell newP to write text (item i of cmds)
+    tell newP to write text (item i of leftCmds)
     set end of leftPanes to newP
   end repeat
 
@@ -307,6 +390,68 @@ tell application "iTerm2"
 end tell
 "#
     )
+}
+
+// ---------------------------------------------------------------------------
+// Cold-code detection: the safe, uncontested files an orc can be handed.
+// ---------------------------------------------------------------------------
+
+/// The largest source files no active session is touching and no uncommitted
+/// change has dirtied -- the best single-shot targets, biggest first (an
+/// oversized file is the prime thing to decompose). `hot` is the set of paths
+/// active sessions have edited; git supplies the tracked and the dirty sets.
+fn cold_targets(repo: &Path, hot: &BTreeSet<String>, want: usize) -> Vec<String> {
+    if want == 0 {
+        return Vec::new();
+    }
+    let dirty: BTreeSet<String> = git_lines(repo, &["status", "--porcelain"])
+        .iter()
+        .filter_map(|l| l.get(3..).map(|s| s.trim().to_string()))
+        .collect();
+
+    let mut cands: Vec<(u64, String)> = git_lines(repo, &["ls-files"])
+        .into_iter()
+        .filter(|p| is_code(p))
+        .filter(|p| !hot.contains(p) && !dirty.contains(p))
+        .filter_map(|p| std::fs::metadata(repo.join(&p)).ok().map(|m| (m.len(), p)))
+        .collect();
+    // Biggest first; ties broken by path so the order is stable.
+    cands.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    cands.into_iter().take(want).map(|(_, p)| p).collect()
+}
+
+/// Lines of `git -C <repo> <args>` stdout, empty on any failure.
+fn git_lines(repo: &Path, args: &[&str]) -> Vec<String> {
+    match Command::new("git").arg("-C").arg(repo).args(args).output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|s| s.to_string())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether a path is source an orc should refactor -- a known code extension,
+/// never a lockfile.
+fn is_code(path: &str) -> bool {
+    const EXT: &[&str] = &[
+        "rs", "ts", "tsx", "js", "jsx", "py", "go", "rb", "java", "kt", "kts", "swift", "c", "cc",
+        "cpp", "cxx", "h", "hpp", "hh", "cs", "php", "scala", "lua", "sh", "zig", "ml", "ex", "exs",
+    ];
+    if path.ends_with(".lock") {
+        return false;
+    }
+    matches!(path.rsplit_once('.'), Some((_, ext)) if EXT.contains(&ext))
+}
+
+/// The single-shot task an orc runs against its cold target. Single-quoted for
+/// the shell and free of both quote kinds, so it survives the AppleScript
+/// double-quoted string it is embedded in.
+fn orc_command(repo: &str, target: &str) -> String {
+    let prompt = format!(
+        "This file is safe to refactor -- no other agent is touching it. Make one focused pass on {target}: decompose it if it is overly large, tighten its structure, and clear any compiler or linter warnings it produces. Keep behaviour identical and every test passing, and prefer to touch only this file."
+    );
+    format!("cd {repo} && claude '{prompt}'")
 }
 
 /// Pipe the AppleScript to `osascript` on stdin, exactly as the shell heredoc did.
@@ -335,14 +480,45 @@ mod tests {
     #[test]
     fn applescript_lists_one_command_per_pane() {
         let work = vec![("id-1".to_string(), "task one".to_string())];
-        let s = applescript("/repo", "/bin/sauron", 3, &work);
-        // First pane resumes the working task; the rest are bare claude.
+        let s = applescript("/repo", "/bin/sauron", 3, &work, &[]);
+        // First hobbit pane resumes the working task; the rest are bare claude.
         assert!(s.contains("cd /repo && claude --resume id-1"));
         assert_eq!(s.matches("cd /repo && claude").count(), 3); // resume line counts too
         // The sauron pane runs this binary against the repo.
         assert!(s.contains("cd /repo && /bin/sauron"));
-        // The command list is a well-formed AppleScript list.
-        assert!(s.contains("set cmds to {\"cd /repo && claude --resume id-1\", "));
+        assert!(s.contains("set leftCmds to {\"cd /repo && claude --resume id-1\", "));
+    }
+
+    #[test]
+    fn applescript_stacks_orcs_beneath_sauron() {
+        let work = vec![("id-1".into(), "t".into())];
+        let orcs = vec![orc_command("/repo", "src/big.rs")];
+        let s = applescript("/repo", "/bin/sauron", 2, &work, &orcs);
+        assert!(s.contains("cd /repo && /bin/sauron")); // sauron on top-right
+        assert!(s.contains("claude --resume id-1")); // a hobbit on the left
+        assert!(s.contains("src/big.rs")); // the orc's target
+        // The orc rides in the right column, and a shell still trails it.
+        assert!(s.contains("set rightCmds to {\"cd /repo && claude 'This file is safe"));
+        assert!(s.contains("'This file is safe to refactor"));
+    }
+
+    #[test]
+    fn is_code_filters_to_source_files() {
+        assert!(is_code("src/main.rs"));
+        assert!(is_code("app/components/Foo.tsx"));
+        assert!(!is_code("Cargo.lock"));
+        assert!(!is_code("README.md"));
+        assert!(!is_code("assets/logo.png"));
+        assert!(!is_code("Makefile"));
+    }
+
+    #[test]
+    fn orc_command_targets_the_file_without_double_quotes() {
+        let c = orc_command("/repo", "src/big.rs");
+        assert!(c.starts_with("cd /repo && claude '"));
+        assert!(c.contains("src/big.rs"));
+        // No double quotes, or it would break the AppleScript string it sits in.
+        assert!(!c.contains('"'), "orc command must be double-quote-free: {c}");
     }
 
     #[test]

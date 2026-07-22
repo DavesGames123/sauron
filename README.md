@@ -119,7 +119,19 @@ sauron workspace                  # the default project (see `alias default`)
 sauron workspace 8                # 8 agent panes
 sauron workspace 8 <project>      # a specific project — count & project any order
 sauron workspace 8 .              # the current folder
+sauron workspace 5 --orcs 2       # 5 hobbits + 2 orcs (see below)
 ```
+
+### 👹 orcs — the maintenance swarm
+
+`--orcs N` looses **N single-shot maintenance agents** into the *cold* corners of
+the repo — the largest source files **no active session is touching** and nothing
+has dirtied in git. Each orc gets one file and makes a focused pass: decompose it
+if it's oversized, tighten structure, and clear its warnings, tests staying
+green. They ride the right column beneath `sauron`, which watches them like any
+other session. Where the **hobbits** do your directed quests, the orcs toil on
+the plumbing you'd never get to — and they only ever take what's safe, so they
+can't collide with a hobbit mid-edit.
 
 `<project>` is a directory (path, `~`, `.`) **or** a short alias you've saved
 into workspace memory:

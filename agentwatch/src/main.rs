@@ -32,7 +32,7 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::execute;
 use ratatui::widgets::ListState;
 
-use model::{now_ms, BlockedReason, Session, Status, DORMANT_AFTER_MS, STALE_HORIZON_MS};
+use model::{now_ms, BlockedReason, ErrorKind, Session, Status, DORMANT_AFTER_MS, STALE_HORIZON_MS};
 use scan::Scanner;
 use store::AckStore;
 
@@ -49,6 +49,8 @@ pub struct Row {
     pub last_activity: i64,
     pub status: Status,
     pub blocked_reason: Option<BlockedReason>,
+    /// The recorded failure behind `Status::Errored`, for the detail line.
+    pub error: Option<ErrorKind>,
     /// Repo paths written but not acked at their current timestamp.
     pub pending: Vec<String>,
     pub total_edits: usize,
@@ -216,6 +218,7 @@ impl App {
             last_activity: s.last_activity,
             status,
             blocked_reason,
+            error: s.error,
             pending,
             total_edits: s.edits.len(),
             last_prompt: s.last_prompt.clone(),
@@ -581,9 +584,13 @@ fn print_once(app: &App) {
         println!("no sessions with repo edits");
         return;
     }
+    let errored = app.rows.iter().filter(|r| r.status == Status::Errored).count();
     let blocked = app.rows.iter().filter(|r| r.status == Status::Blocked).count();
     let needs = app.rows.iter().filter(|r| r.status == Status::NeedsTest).count();
     let mut banner = Vec::new();
+    if errored > 0 {
+        banner.push(format!("{} ERRORED", errored));
+    }
     if blocked > 0 {
         banner.push(format!("{} WAITING ON YOU", blocked));
     }
@@ -594,6 +601,7 @@ fn print_once(app: &App) {
 
     for r in &app.rows {
         let glyph = match r.status {
+            Status::Errored => "✖",
             Status::Blocked => "▲",
             Status::NeedsTest => "█",
             Status::Working => "◐",
@@ -606,8 +614,12 @@ fn print_once(app: &App) {
             model::ago(r.last_activity, now),
             r.status.label()
         );
-        // Blocked sessions: what they want matters more than a file count.
-        if r.status == Status::Blocked {
+        // Errored / blocked sessions: what's wrong matters more than a file count.
+        if r.status == Status::Errored {
+            if let Some(e) = r.error {
+                println!("    {}", e.detail());
+            }
+        } else if r.status == Status::Blocked {
             if let Some(reason) = r.blocked_reason {
                 println!("    {}", reason.detail());
             }

@@ -27,6 +27,7 @@ use crate::Row;
 /// Status palette. Each state owns one hue and keeps it everywhere it appears --
 /// glyph, title, section rule, header tally -- so the colour alone identifies
 /// the state without reading the label.
+const MAGENTA: Color = Color::Rgb(240, 90, 200); // errored — dead, needs rescue
 const RED: Color = Color::Rgb(255, 92, 110); // blocked on your answer
 const AMBER: Color = Color::Rgb(255, 176, 66); // awaiting acknowledgement
 const CYAN: Color = Color::Rgb(86, 205, 226); // agent still working
@@ -37,6 +38,7 @@ const INK: Color = Color::Rgb(18, 20, 24); // text on a filled badge
 
 pub fn color_of(status: Status) -> Color {
     match status {
+        Status::Errored => MAGENTA,
         Status::Blocked => RED,
         Status::NeedsTest => AMBER,
         Status::Working => CYAN,
@@ -46,6 +48,7 @@ pub fn color_of(status: Status) -> Color {
 
 fn glyph_of(status: Status) -> &'static str {
     match status {
+        Status::Errored => "✖",
         Status::Blocked => "▲",
         Status::NeedsTest => "█",
         Status::Working => "◐",
@@ -109,6 +112,20 @@ fn header(f: &mut Frame, area: Rect, v: &View) {
         Span::raw("   "),
     ];
 
+    // An errored agent is dead until rescued and will not recover on its own, so
+    // it sits leftmost of all -- ahead even of the blocked badge.
+    let errored = v.rows.iter().filter(|r| r.status == Status::Errored).count();
+    if errored > 0 {
+        top.push(Span::styled(
+            format!(" {} ERRORED ", errored),
+            Style::default()
+                .fg(INK)
+                .bg(MAGENTA)
+                .add_modifier(Modifier::BOLD),
+        ));
+        top.push(Span::raw("  "));
+    }
+
     // A blocked agent is doing nothing until you reply, so it gets the loudest
     // badge and sits leftmost -- ahead even of the awaiting count.
     let blocked = v.rows.iter().filter(|r| r.status == Status::Blocked).count();
@@ -133,9 +150,9 @@ fn header(f: &mut Frame, area: Rect, v: &View) {
                 .bg(AMBER)
                 .add_modifier(Modifier::BOLD),
         ));
-    } else if blocked == 0 {
+    } else if blocked == 0 && errored == 0 {
         // Only claim this when nothing at all wants a human -- saying "all
-        // caught up" beside a stalled agent would be a lie.
+        // caught up" beside a stalled or dead agent would be a lie.
         top.push(Span::styled(
             " all caught up ",
             Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
@@ -230,6 +247,7 @@ fn list(f: &mut Frame, area: Rect, v: &View, list_state: &mut ListState, geo: &m
 /// "needs me" and "does not" without reading any labels.
 fn section_header(status: Status, count: usize, width: usize) -> ListItem<'static> {
     let (label, color) = match status {
+        Status::Errored => ("ERRORED", MAGENTA),
         Status::Blocked => ("WAITING ON YOU", RED),
         Status::NeedsTest => ("AWAITING ACKNOWLEDGEMENT", AMBER),
         Status::Working => ("WORKING", CYAN),
@@ -260,6 +278,9 @@ fn card(row: &Row, selected: bool, now: i64, width: usize) -> ListItem<'static> 
     };
 
     let title_style = match row.status {
+        Status::Errored => Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
         Status::Blocked => Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
@@ -286,14 +307,18 @@ fn card(row: &Row, selected: bool, now: i64, width: usize) -> ListItem<'static> 
         return ListItem::new(vec![first]);
     }
 
-    let detail_color = if row.status == Status::NeedsTest {
-        AMBER
-    } else {
-        DIM
+    let detail_color = match row.status {
+        Status::Errored => MAGENTA,
+        Status::NeedsTest => AMBER,
+        _ => DIM,
     };
-    // A blocked agent's file count is beside the point -- what it asked is what
-    // you need. Show the prompt instead of "0 file(s) · all acked".
-    let summary = if row.status == Status::Blocked {
+    // A dead agent's file count is beside the point -- name the failure.
+    let summary = if row.status == Status::Errored {
+        row.error
+            .map(|e| e.short())
+            .unwrap_or("turn ended on a failure")
+            .to_string()
+    } else if row.status == Status::Blocked {
         let why = row
             .blocked_reason
             .map(|r| r.short())
@@ -363,6 +388,16 @@ fn detail(f: &mut Frame, area: Rect, row: Option<&Row>, now: i64) {
     ])];
 
     match row.status {
+        Status::Errored => {
+            let text = match row.error {
+                Some(e) => format!("{} — switch to its terminal", e.detail()),
+                None => "turn ended on a failure".to_string(),
+            };
+            lines.push(Line::styled(
+                text,
+                Style::default().fg(MAGENTA).add_modifier(Modifier::BOLD),
+            ));
+        }
         Status::Blocked => {
             let text = match row.blocked_reason {
                 Some(r) => format!("{} — switch to its terminal, or a to dismiss", r.detail()),
@@ -546,5 +581,8 @@ mod tests {
         assert_ne!(color_of(Status::NeedsTest), color_of(Status::Working));
         assert_ne!(color_of(Status::NeedsTest), color_of(Status::Clear));
         assert_ne!(color_of(Status::Working), color_of(Status::Clear));
+        // Errored must not read as Blocked -- the whole point is that a dead
+        // agent is a different thing from a polite "waiting on you".
+        assert_ne!(color_of(Status::Errored), color_of(Status::Blocked));
     }
 }

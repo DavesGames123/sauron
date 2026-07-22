@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::model::{parse_rfc3339_ms, Session};
+use crate::model::{parse_rfc3339_ms, ErrorKind, Session};
 
 struct Tracked {
     /// Bytes already folded into `session`. Only complete lines are counted.
@@ -167,12 +167,39 @@ fn fold_record(session: &mut Session, v: &Value, repo_root: &Path) {
             // `null` stop_reason appears on streaming partials; treat it as
             // in-flight rather than complete.
             session.turn_complete = stop == Some("end_turn");
+
+            // Failure signals. Claude Code records a surfaced API error as an
+            // assistant record flagged `isApiErrorMessage` (the field also
+            // appears as `false` on ordinary messages, so match `true`
+            // explicitly); truncation and refusal arrive as stop_reasons. Any of
+            // them means the turn died rather than handed back. A healthy stop
+            // (`end_turn`/`stop_sequence`) or continued work (`tool_use`) clears
+            // the flag, so a session that recovered on a later record stops
+            // reading as errored.
+            let api_error = v.get("isApiErrorMessage").and_then(|b| b.as_bool()) == Some(true);
+            if api_error {
+                session.error = Some(ErrorKind::ApiError);
+            } else {
+                match stop {
+                    Some("max_tokens") => session.error = Some(ErrorKind::Truncated),
+                    Some("refusal") => session.error = Some(ErrorKind::Refusal),
+                    Some("end_turn") | Some("stop_sequence") | Some("tool_use") => {
+                        session.error = None;
+                    }
+                    // `null` (streaming partial) and anything unrecognised leave a
+                    // prior error standing rather than papering over it.
+                    _ => {}
+                }
+            }
         }
         "user" => {
             // isMeta records are harness bookkeeping (command caveats, hook
             // output), not the user or a tool actually driving the turn.
             if v.get("isMeta").and_then(|m| m.as_bool()) != Some(true) {
                 session.turn_complete = false;
+                // A real user turn after a failure means the human already
+                // engaged it (a retry, a new prompt) -- the error is stale.
+                session.error = None;
             }
         }
         // The stop hook fires when a turn ends and emits these. They are a more
@@ -467,5 +494,82 @@ mod tests {
             s.edits["src/a.rs"],
             parse_rfc3339_ms("2026-07-21T12:00:00.000Z").unwrap()
         );
+    }
+
+    #[test]
+    fn api_error_outranks_the_stop_hook_that_follows_it() {
+        use crate::model::Status;
+        let root = Path::new("/repo");
+        let mut s = Session::default();
+
+        // Turn dies on an API error rendered as an assistant message.
+        fold_record(
+            &mut s,
+            &json!({"type":"assistant","isApiErrorMessage":true,
+                    "timestamp":"2026-07-21T18:00:00.000Z",
+                    "message":{"role":"assistant","stop_reason":null}}),
+            root,
+        );
+        assert_eq!(s.error, Some(ErrorKind::ApiError));
+
+        // The stop hook fires afterward and sets turn_complete -- the exact record
+        // that used to launder a dead agent into a polite "waiting on you".
+        fold_record(
+            &mut s,
+            &json!({"type":"system","subtype":"stop_hook_summary",
+                    "timestamp":"2026-07-21T18:00:01.000Z"}),
+            root,
+        );
+        assert!(s.turn_complete);
+
+        // Error still wins: recent stop, nothing pending, would have been
+        // AwaitingInput/Blocked before. Now it is Errored.
+        let now = parse_rfc3339_ms("2026-07-21T18:00:05.000Z").unwrap();
+        assert_eq!(s.status(now, None), Status::Errored);
+
+        // A real user turn (a retry) clears the stale failure.
+        fold_record(&mut s, &json!({"type":"user","message":{"role":"user"}}), root);
+        assert_eq!(s.error, None);
+        assert_ne!(s.status(now, None), Status::Errored);
+    }
+
+    #[test]
+    fn max_tokens_is_errored_but_a_clean_stop_clears_it() {
+        use crate::model::Status;
+        let root = Path::new("/repo");
+        let mut s = Session::default();
+
+        fold_record(
+            &mut s,
+            &json!({"type":"assistant","timestamp":"2026-07-21T18:00:00.000Z",
+                    "message":{"stop_reason":"max_tokens"}}),
+            root,
+        );
+        assert_eq!(s.error, Some(ErrorKind::Truncated));
+
+        // stop_sequence is a healthy completion, not a failure -- it must clear.
+        fold_record(
+            &mut s,
+            &json!({"type":"assistant","timestamp":"2026-07-21T18:00:02.000Z",
+                    "message":{"stop_reason":"stop_sequence"}}),
+            root,
+        );
+        assert_eq!(s.error, None, "stop_sequence must not read as an error");
+        let now = parse_rfc3339_ms("2026-07-21T18:00:05.000Z").unwrap();
+        assert_ne!(s.status(now, None), Status::Errored);
+    }
+
+    #[test]
+    fn is_api_error_false_is_not_an_error() {
+        let root = Path::new("/repo");
+        let mut s = Session::default();
+        // The field appears as `false` on ordinary messages; must not trip.
+        fold_record(
+            &mut s,
+            &json!({"type":"assistant","isApiErrorMessage":false,
+                    "message":{"stop_reason":"end_turn"}}),
+            root,
+        );
+        assert_eq!(s.error, None);
     }
 }

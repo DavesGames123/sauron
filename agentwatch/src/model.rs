@@ -85,8 +85,53 @@ impl BlockedReason {
     }
 }
 
+/// How a turn died, when it ended on a recorded failure rather than a handback.
+///
+/// Every failure mode previously collapsed into `AwaitingInput` because the
+/// classifier read log *shape* (turn ended, nothing pending) and never *why* it
+/// ended. These are the three failures Claude Code actually records in the jsonl.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// An assistant record carried `isApiErrorMessage: true` -- Claude Code
+    /// rendered an API failure (overloaded, rate-limited, context length) as the
+    /// turn's final message. The agent is dead until a human retries it.
+    ApiError,
+    /// `stop_reason: "max_tokens"` -- the response hit the output cap and was
+    /// truncated mid-thought. Not a handback; the agent got cut off.
+    Truncated,
+    /// `stop_reason: "refusal"` -- the model declined to continue.
+    Refusal,
+}
+
+impl ErrorKind {
+    pub fn detail(self) -> &'static str {
+        match self {
+            ErrorKind::ApiError => {
+                "API error ended the turn (overload / rate limit / context) — retry it"
+            }
+            ErrorKind::Truncated => {
+                "response hit max_tokens and was cut off mid-turn — needs a nudge to continue"
+            }
+            ErrorKind::Refusal => "model refused to continue the turn",
+        }
+    }
+
+    pub fn short(self) -> &'static str {
+        match self {
+            ErrorKind::ApiError => "API error — retry",
+            ErrorKind::Truncated => "cut off (max_tokens)",
+            ErrorKind::Refusal => "refused",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
+    /// The turn ended on a recorded failure (API error / truncation / refusal),
+    /// not a handback. Ranks above everything: a blocked agent resumes the moment
+    /// you answer it, but an errored one will sit dead until a human rescues it,
+    /// and it was previously indistinguishable from a polite "waiting on you".
+    Errored,
     /// Asked a question (AskUserQuestion / ExitPlanMode) that has no tool_result
     /// yet. The agent has stopped and is burning wall-clock waiting on a human.
     /// Ranks above everything else: nothing else on screen is costing time right
@@ -103,6 +148,7 @@ pub enum Status {
 impl Status {
     pub fn label(self) -> &'static str {
         match self {
+            Status::Errored => "ERRORED",
             Status::Blocked => "WAITING ON YOU",
             Status::Working => "working",
             Status::NeedsTest => "NEEDS TEST",
@@ -110,14 +156,16 @@ impl Status {
         }
     }
 
-    /// Sort rank: what should demand attention first. A blocked agent outranks
-    /// untested work because it is stalled until you act; untested work is not.
+    /// Sort rank: what should demand attention first. An errored agent outranks a
+    /// blocked one because it will not recover on its own; a blocked agent
+    /// outranks untested work because it is stalled until you act.
     pub fn rank(self) -> u8 {
         match self {
-            Status::Blocked => 0,
-            Status::NeedsTest => 1,
-            Status::Working => 2,
-            Status::Clear => 3,
+            Status::Errored => 0,
+            Status::Blocked => 1,
+            Status::NeedsTest => 2,
+            Status::Working => 3,
+            Status::Clear => 4,
         }
     }
 }
@@ -142,6 +190,11 @@ pub struct Session {
     /// tool_use ids of any kind with no tool_result yet. Combined with a silent
     /// log this is the only available trace of a pending permission prompt.
     pub pending_tools: BTreeSet<String>,
+    /// Set when the turn ended on a recorded failure and cleared the moment a
+    /// healthy assistant stop or a fresh user turn supersedes it -- so it names
+    /// only a failure the session is *currently* parked on, never a stale one it
+    /// already recovered from. `Some` forces `Status::Errored`.
+    pub error: Option<ErrorKind>,
     /// Repo-relative path -> epoch millis of its most recent write by this session.
     pub edits: BTreeMap<String, i64>,
 }
@@ -246,6 +299,13 @@ impl Session {
     }
 
     pub fn status(&self, now: i64, acked: Option<&BTreeMap<String, i64>>) -> Status {
+        // A recorded failure outranks everything, including a blocked question:
+        // the stop hook that fires after an error would otherwise set
+        // turn_complete and let this session masquerade as a polite "waiting on
+        // you", which is exactly the misread this state exists to end.
+        if self.error.is_some() {
+            return Status::Errored;
+        }
         // Anything waiting on a human outranks everything else.
         if self.blocked_reason(now, acked).is_some() {
             return Status::Blocked;

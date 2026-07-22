@@ -1,15 +1,26 @@
 <div align="center">
 
-# 🛰️ sauron
+# 👁️ sauron
 
 ### Know what your agents changed — before you ship it.
 
 A read-only sidecar for running **many coding agents at once** — [Claude Code](https://claude.com/claude-code) and [OpenAI Codex](https://github.com/openai/codex) — and never losing track of which ones left work you haven't tested.
 
-<br>
+</div>
+
+```
+                    ▄▟█████▙▄
+                  █▟███████▙█        The lidless Eye, wreathed in fire,
+                  █▐███████▌█        watches every agent in your swarm
+                  █▜███████▛█        — and tells you which one left work
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▟███████████▙▁▁▁▁    you still need to test.
+```
+
+<div align="center">
 
 ![Rust](https://img.shields.io/badge/built_with-Rust-CE422B?style=for-the-badge&logo=rust&logoColor=white)
 ![ratatui](https://img.shields.io/badge/TUI-ratatui-7C3AED?style=for-the-badge)
+![Agents](https://img.shields.io/badge/agents-Claude_·_Codex-FF7A18?style=for-the-badge)
 ![macOS](https://img.shields.io/badge/workspace-macOS_·_iTerm2-000000?style=for-the-badge&logo=apple&logoColor=white)
 ![Read only](https://img.shields.io/badge/repo_writes-none-2EA043?style=for-the-badge)
 
@@ -36,9 +47,21 @@ code and becomes *trusting* it. Which sessions actually touched the repo? Which
 are quietly **blocked on a question only you can answer**? What have you already
 reviewed? **sauron** answers exactly that — and nothing else.
 
-It reads the Claude Code session logs under
-`~/.claude/projects/<repo>/*.jsonl`, re-tailing every two seconds. It **writes
+It reads each agent's session logs, re-tailing every two seconds. It **writes
 nothing to your repo** and **never talks to a running agent**.
+
+---
+
+## 🎭 The cast
+
+You are Sauron. Your servants get the work done; the Eye keeps watch.
+
+| | Who | What they do |
+|:-:|:--|:--|
+| 🧝 | **hobbits** | the agents you direct — resumed into the `workspace` panes to do the real quests |
+| 👹 | **orcs** | single-shot maintenance agents you loose on the *cold* corners: decompose, document, de-warn |
+| 👁️ | **the Eye** | sauron itself, watching every session and flagging what needs you |
+| 💍 | **Nazgûl** | *reserved* — the Nine are for something worse, later |
 
 <br>
 
@@ -115,12 +138,26 @@ cp sauron/target/release/sauron /usr/local/bin/
 > **macOS + iTerm2 only.**
 
 ```bash
-sauron workspace                  # the default project (see `alias default`)
-sauron workspace 8                # 8 agent panes
+sauron workspace                  # the repo you're standing in, with a quick prompt
+sauron workspace 8                # …suggesting 8 panes
 sauron workspace 8 <project>      # a specific project — count & project any order
-sauron workspace 8 .              # the current folder
+sauron workspace 8 .              # the current folder, explicitly
 sauron workspace 5 --orcs 2       # 5 hobbits + 2 orcs (see below)
+sauron workspace 8 <project> -y   # skip the prompt (also skipped when scripted)
 ```
+
+A bare **`sauron workspace`** opens the **repository you're in** (the git repo
+containing your cwd) and asks a quick question first:
+
+```
+  sauron workspace  →  /Users/you/code/worldsmith   (claude)
+  panes [5]: 
+  orcs  [0]: 
+  launch 5 pane(s), 0 orc(s)? [Y/n]
+```
+
+Press Enter to accept each, type a number to change it, `q` to bail. Pass `-y`
+(or pipe/redirect stdin) to skip the dialogue entirely.
 
 ### 👹 orcs — the maintenance swarm
 
@@ -143,8 +180,8 @@ what remains, and clear its warnings — tests staying green.
 into workspace memory:
 
 ```bash
-sauron workspace alias default ~/code/my-repo   # what a bare `sauron workspace` opens
 sauron workspace alias api ~/code/api-service   # then:  sauron workspace 6 api
+sauron workspace alias worldsmith ~/code/worldsmith
 sauron workspace alias                          # list saved aliases
 sauron workspace unalias api                    # forget one
 ```

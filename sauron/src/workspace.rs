@@ -16,7 +16,7 @@
 //!   fn osascript        -- pipe the script to `osascript`
 
 use std::collections::BTreeSet;
-use std::io::Write;
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -62,6 +62,7 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
     // while the hobbits do the directed work. The rest is [init] [N] [project],
     // order-independent -- a purely-numeric arg is the pane count, else the project.
     let mut orcs = 0usize;
+    let mut yes = false; // skip the confirmation dialogue
     let mut pos: Vec<&str> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -77,6 +78,9 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
             i += 2;
         } else if let Some(rest) = a.strip_prefix("--orcs=") {
             orcs = rest.parse().unwrap_or(0);
+            i += 1;
+        } else if a == "--yes" || a == "-y" {
+            yes = true;
             i += 1;
         } else if a == "--codex" || a == "--claude" {
             // Consumed at the top level into `explicit_agent`; skip here.
@@ -127,12 +131,28 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
 
     let work = crate::in_flight_tasks(repo.clone(), agent);
     // Pane count: explicit arg wins; else one per in-flight task; else 4 bare.
-    let total = n_arg.unwrap_or(if work.is_empty() { 4 } else { work.len() });
+    let default_panes = n_arg.unwrap_or(if work.is_empty() { 4 } else { work.len() });
 
     // The panes run this very sauron binary for the TUI, by its real path, so a
     // restored iTerm session keeps resolving it.
     let sauron_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sauron"));
     let repo_s = repo.to_string_lossy().into_owned();
+
+    // A quick confirmation of what's about to open -- unless a dry run, `--yes`,
+    // or a non-interactive stdin. The dialogue can adjust the pane and orc counts.
+    let dry = std::env::var_os("WORKSPACE_DRYRUN").is_some();
+    let (total, orcs) = if dry || yes || !std::io::stdin().is_terminal() {
+        (default_panes, orcs)
+    } else {
+        match confirm(&repo_s, agent.label(), default_panes, orcs) {
+            Some(v) => v,
+            None => {
+                println!("sauron workspace: cancelled — nothing opened.");
+                return Ok(());
+            }
+        }
+    };
+    let total = total.max(1); // always at least the one agent pane
 
     // Assign each orc a cold target: the largest source files no active session
     // is touching. Fewer safe targets than asked -> fewer orcs (nothing else is
@@ -158,7 +178,7 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
 
     // Dry run: report the plan and stop, before touching iTerm (used by tests
     // and handy for "what would `sauron workspace X` actually open?").
-    if std::env::var_os("WORKSPACE_DRYRUN").is_some() {
+    if dry {
         println!("REPO={repo_s}");
         println!("AGENT={}", agent.label());
         println!("TOTAL={total}");
@@ -290,16 +310,58 @@ fn resolve(project: &str) -> Option<PathBuf> {
 }
 
 fn default_repo() -> PathBuf {
+    // Start from the repository you're standing in: $WORKSPACE_REPO if set, else
+    // the git repo containing the cwd, else the cwd itself. (The `default` alias
+    // is no longer special -- open it by name, `sauron workspace default`.)
     if let Some(r) = std::env::var_os("WORKSPACE_REPO") {
         return PathBuf::from(r);
     }
-    if let Some(p) = alias_lookup("default") {
-        let pb = PathBuf::from(p);
-        if pb.is_dir() {
-            return pb;
+    crate::git_root().unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+/// A quick interactive confirmation before opening a cockpit. Shows the repo and
+/// agent, lets you adjust the pane and orc counts, and confirms. Returns the
+/// `(panes, orcs)` to open, or `None` to cancel.
+fn confirm(repo: &str, agent: &str, panes: usize, orcs: usize) -> Option<(usize, usize)> {
+    println!();
+    println!("  sauron workspace  →  {repo}   ({agent})");
+    let panes = ask_count("panes", panes)?;
+    let orcs = ask_count("orcs ", orcs)?;
+    print!("  launch {panes} pane(s), {orcs} orc(s)? [Y/n] ");
+    std::io::stdout().flush().ok();
+    match read_line()?.trim().to_ascii_lowercase().as_str() {
+        "n" | "no" | "q" | "cancel" => None,
+        _ => Some((panes, orcs)),
+    }
+}
+
+/// Prompt for a count with a default (blank accepts it, `q` cancels).
+fn ask_count(label: &str, default: usize) -> Option<usize> {
+    loop {
+        print!("  {label} [{default}]: ");
+        std::io::stdout().flush().ok();
+        let line = read_line()?;
+        let t = line.trim();
+        if t.is_empty() {
+            return Some(default);
+        }
+        if matches!(t, "q" | "cancel") {
+            return None;
+        }
+        match t.parse::<usize>() {
+            Ok(n) => return Some(n),
+            Err(_) => println!("    enter a number, or q to cancel"),
         }
     }
-    crate::git_root().unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+/// Read one line from stdin; `None` on EOF (Ctrl-D) or error, treated as cancel.
+fn read_line() -> Option<String> {
+    let mut s = String::new();
+    match std::io::stdin().lock().read_line(&mut s) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => Some(s),
+    }
 }
 
 // ---------------------------------------------------------------------------

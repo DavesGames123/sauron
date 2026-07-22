@@ -21,8 +21,9 @@ mod store;
 mod ui;
 
 use std::collections::BTreeMap;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
@@ -475,6 +476,10 @@ fn main() -> std::io::Result<()> {
     // Shift to select while this runs.
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let mut last_tick = Instant::now();
+    // Remember the binary's mtime at launch. When a rebuild lands (cargo writes
+    // via atomic rename, so the mtime jumps once), the loop re-execs the new
+    // binary in place -- no more staring at a stale build after a rebuild.
+    let launch_exe_mtime = exe_mtime();
 
     let result = loop {
         let now = now_ms();
@@ -552,6 +557,15 @@ fn main() -> std::io::Result<()> {
         if last_tick.elapsed() >= TICK {
             app.refresh();
             last_tick = Instant::now();
+
+            // Rebuilt on disk? Re-exec so the running window becomes the new
+            // build. exec() only returns on failure, in which case we keep
+            // running the current binary and surface the error.
+            if let (Some(launch), Some(current)) = (launch_exe_mtime, exe_mtime()) {
+                if current > launch {
+                    break Err(reload());
+                }
+            }
         }
     };
 
@@ -609,6 +623,27 @@ fn print_once(app: &App) {
         }
         println!();
     }
+}
+
+/// Modification time of this process's own executable, following a symlink to
+/// the real binary. None if it cannot be read (then auto-reload is disabled).
+fn exe_mtime() -> Option<SystemTime> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok())
+}
+
+/// Replace this process with a fresh copy of the (rebuilt) binary, same args.
+/// Terminal state is restored first so the new process starts on a clean tty and
+/// a failed exec does not strand the terminal in raw mode. On Unix, exec() only
+/// returns if it failed; the returned error is surfaced by the caller.
+fn reload() -> std::io::Error {
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    ratatui::restore();
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agentwatch"));
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    std::process::Command::new(exe).args(args).exec()
 }
 
 /// Walk up from the cwd looking for a .git entry, so the tool works from any

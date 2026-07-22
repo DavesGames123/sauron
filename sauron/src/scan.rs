@@ -1,14 +1,17 @@
-//! Incremental reader over the Claude Code session logs for one repo.
+//! Incremental reader over an agent's session logs for one repo.
 //!
 //! The logs are append-only JSONL and reach 10MB. Re-parsing every file on every
 //! 2s tick would burn real CPU alongside four running agents, so each file keeps
-//! a byte offset and only newly appended bytes are parsed.
+//! a byte offset and only newly appended bytes are parsed. Which files to read,
+//! how to name a session from its path, and how to fold one record all come from
+//! the `Agent` -- this module is the mechanism; Claude Code is one agent (its
+//! fold lives here as `fold_record`), Codex is another (see `codex`).
 //!
 //! grep targets:
 //!   struct Scanner          -- owns per-file offsets and folded sessions
-//!   fn Scanner::new         -- derives the log dir from a repo path
-//!   fn Scanner::refresh     -- tail every jsonl, fold new records
-//!   fn fold_record          -- one jsonl record -> mutation on a Session
+//!   fn Scanner::refresh     -- tail each session file, fold new records
+//!   fn fold_record          -- one Claude Code record -> mutation on a Session
+//!   fn claude_session_files -- the jsonl for a repo under ~/.claude/projects
 //!   fn project_dir_for      -- /a/b/c -> ~/.claude/projects/-a-b-c
 
 use std::collections::HashMap;
@@ -18,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::agent::Agent;
 use crate::model::{parse_rfc3339_ms, ErrorKind, Session};
 
 struct Tracked {
@@ -27,15 +31,17 @@ struct Tracked {
 }
 
 pub struct Scanner {
+    agent: Agent,
     log_dir: PathBuf,
     repo_root: PathBuf,
     tracked: HashMap<PathBuf, Tracked>,
 }
 
 impl Scanner {
-    pub fn new(repo_root: PathBuf) -> Self {
+    pub fn new(repo_root: PathBuf, agent: Agent) -> Self {
         Self {
-            log_dir: project_dir_for(&repo_root),
+            agent,
+            log_dir: agent.log_root(&repo_root),
             repo_root,
             tracked: HashMap::new(),
         }
@@ -49,31 +55,32 @@ impl Scanner {
         &self.repo_root
     }
 
-    /// Tail every session log in the directory and return the folded sessions.
+    /// Tail each of the agent's session files for this repo and return the
+    /// folded sessions.
     pub fn refresh(&mut self) -> Vec<Session> {
-        let entries = match std::fs::read_dir(&self.log_dir) {
-            Ok(e) => e,
-            // Directory missing means no sessions for this repo yet -- not an error.
-            Err(_) => return Vec::new(),
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
+        for path in self.agent.session_files(&self.repo_root) {
             self.tail_file(&path);
         }
-
         self.tracked.values().map(|t| t.session.clone()).collect()
     }
 
+    /// The jsonl files under a Claude Code project directory.
+    pub(crate) fn claude_session_files(repo_root: &Path) -> Vec<PathBuf> {
+        let dir = project_dir_for(repo_root);
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+            .collect()
+    }
+
     fn tail_file(&mut self, path: &Path) {
-        let id = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_string();
+        let agent = self.agent;
+        let repo = self.repo_root.clone();
+        let id = agent.session_id(path);
 
         let entry = self.tracked.entry(path.to_path_buf()).or_insert_with(|| Tracked {
             offset: 0,
@@ -128,7 +135,7 @@ impl Scanner {
                 continue;
             }
             if let Ok(v) = serde_json::from_str::<Value>(line) {
-                fold_record(&mut entry.session, &v, &self.repo_root);
+                agent.fold(&mut entry.session, &v, &repo);
             }
         }
 
@@ -136,8 +143,8 @@ impl Scanner {
     }
 }
 
-/// Apply one log record to the session being accumulated.
-fn fold_record(session: &mut Session, v: &Value, repo_root: &Path) {
+/// Apply one Claude Code log record to the session being accumulated.
+pub(crate) fn fold_record(session: &mut Session, v: &Value, repo_root: &Path) {
     let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
     if let Some(ts) = v.get("timestamp").and_then(|t| t.as_str()) {
@@ -413,7 +420,7 @@ fn fold_questions(session: &mut Session, v: &Value) {
 /// Sessions also log writes to scratchpad scripts and `~/.claude` memory files.
 /// Those are not testable software changes, and including them roughly doubled
 /// the apparent write-set in every session sampled.
-fn repo_relative(raw: &str, repo_root: &Path) -> Option<String> {
+pub(crate) fn repo_relative(raw: &str, repo_root: &Path) -> Option<String> {
     let p = Path::new(raw);
     if p.is_absolute() {
         return p

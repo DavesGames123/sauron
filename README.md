@@ -164,6 +164,30 @@ a restored window keeps working. Registry lives at `~/.claude/sauron/workspaces`
 
 ---
 
+## 🤖 Agents — Claude Code & Codex
+
+sauron watches **Claude Code** by default. It also reads **OpenAI Codex** rollouts
+(`~/.codex/sessions`) — pick the agent with a flag, `$SAURON_AGENT`, or let it
+auto-detect from whichever has logs for the repo:
+
+```bash
+sauron                 # auto-detect (Claude if it has logs, else Codex)
+sauron --codex         # force Codex
+SAURON_AGENT=codex sauron
+sauron workspace 5 --codex   # a Codex cockpit: panes run `codex`, orcs `codex exec`
+```
+
+Everything downstream — the status model, the cards, workspace, orcs — is
+agent-agnostic; only *where the logs are* and *how one record folds into a
+session* differ per agent, behind a small `Agent` seam (`src/agent.rs`).
+
+> **Codex support is best-effort and unverified** — it was written against the
+> documented rollout format on a machine with no Codex install. It's defensive
+> (degrades rather than crashes), but if edits or prompts look off, one real
+> rollout `.jsonl` pins the exact field names. Reports welcome.
+
+---
+
 ## 🔍 How it reads sessions
 
 Claude Code encodes a project path by swapping separators for dashes:

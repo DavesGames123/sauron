@@ -20,11 +20,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::agent::Agent;
 use crate::scan::home;
 
 /// Entry point for `sauron workspace <args>` (args are everything after the
-/// `workspace` word).
-pub fn run(args: &[String]) -> std::io::Result<()> {
+/// `workspace` word). `explicit_agent` is the `--claude`/`--codex` choice from
+/// the top level, if any.
+pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()> {
     // Registry subcommands run and return before any launch work.
     match args.first().map(|s| s.as_str()) {
         Some("alias") | Some("aliases") => {
@@ -76,6 +78,9 @@ pub fn run(args: &[String]) -> std::io::Result<()> {
         } else if let Some(rest) = a.strip_prefix("--orcs=") {
             orcs = rest.parse().unwrap_or(0);
             i += 1;
+        } else if a == "--codex" || a == "--claude" {
+            // Consumed at the top level into `explicit_agent`; skip here.
+            i += 1;
         } else {
             pos.push(a);
             i += 1;
@@ -116,7 +121,11 @@ pub fn run(args: &[String]) -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    let work = crate::in_flight_tasks(repo.clone());
+    // Which agent's sessions to reopen and spawn: the flag, else $SAURON_AGENT,
+    // else auto-detect from this repo's logs.
+    let agent = Agent::select(explicit_agent, &repo);
+
+    let work = crate::in_flight_tasks(repo.clone(), agent);
     // Pane count: explicit arg wins; else one per in-flight task; else 4 bare.
     let total = n_arg.unwrap_or(if work.is_empty() { 4 } else { work.len() });
 
@@ -129,7 +138,7 @@ pub fn run(args: &[String]) -> std::io::Result<()> {
     // is touching. Fewer safe targets than asked -> fewer orcs (nothing else is
     // safe to hand out without risking a collision with a hobbit).
     let orc_targets = if orcs > 0 {
-        let hot = crate::hot_files(repo.clone());
+        let hot = crate::hot_files(repo.clone(), agent);
         let targets = cold_targets(&repo, &hot, orcs);
         if targets.len() < orcs {
             eprintln!(
@@ -142,12 +151,16 @@ pub fn run(args: &[String]) -> std::io::Result<()> {
     } else {
         Vec::new()
     };
-    let orc_cmds: Vec<String> = orc_targets.iter().map(|t| orc_command(&repo_s, t)).collect();
+    let orc_cmds: Vec<String> = orc_targets
+        .iter()
+        .map(|t| orc_command(&repo_s, t, agent))
+        .collect();
 
     // Dry run: report the plan and stop, before touching iTerm (used by tests
     // and handy for "what would `sauron workspace X` actually open?").
     if std::env::var_os("WORKSPACE_DRYRUN").is_some() {
         println!("REPO={repo_s}");
+        println!("AGENT={}", agent.label());
         println!("TOTAL={total}");
         println!("SAURON={}", sauron_exe.display());
         for t in &orc_targets {
@@ -156,7 +169,7 @@ pub fn run(args: &[String]) -> std::io::Result<()> {
         return Ok(());
     }
 
-    let script = applescript(&repo_s, &sauron_exe.to_string_lossy(), total, &work, &orc_cmds);
+    let script = applescript(&repo_s, &sauron_exe.to_string_lossy(), total, &work, &orc_cmds, agent);
     osascript(&script)?;
 
     let resumed = total.min(work.len());
@@ -314,14 +327,16 @@ fn applescript(
     total: usize,
     work: &[(String, String)],
     orc_cmds: &[String],
+    agent: Agent,
 ) -> String {
-    // Left column: resume each in-flight session, bare `claude` for the rest.
+    // Left column: resume each in-flight session, a fresh agent for the rest.
     let left: Vec<String> = (0..total)
         .map(|i| match work.get(i) {
-            Some((id, _)) => format!("cd {repo} && claude --resume {id}"),
-            None => format!("cd {repo} && claude"),
+            Some((id, _)) => format!("cd {repo} && {}", agent.resume_cmd(id)),
+            None => format!("cd {repo} && {}", agent.label()),
         })
         .collect();
+    let sauron_flag = agent.label(); // watcher pane matches the chosen agent
 
     // Right column beneath sauron: the orcs, then a shell. With no orcs, two
     // plain shells, as before.
@@ -360,7 +375,7 @@ tell application "iTerm2"
   -- panes stay balanced -- repeatedly splitting the newest drives it below
   -- iTerm2's minimum height, which throws and aborts the remaining splits.
   tell leftTop to set rTop to (split vertically with default profile)
-  tell rTop to write text "cd {repo} && {sauron_exe}"
+  tell rTop to write text "cd {repo} && {sauron_exe} --{sauron_flag}"
   set rightPanes to {{rTop}}
   repeat with i from 1 to (count of rightCmds)
     set tallest to item 1 of rightPanes
@@ -447,11 +462,11 @@ fn is_code(path: &str) -> bool {
 /// The single-shot task an orc runs against its cold target. Single-quoted for
 /// the shell and free of both quote kinds, so it survives the AppleScript
 /// double-quoted string it is embedded in.
-fn orc_command(repo: &str, target: &str) -> String {
+fn orc_command(repo: &str, target: &str, agent: Agent) -> String {
     let prompt = format!(
         "This file is safe to refactor -- no other agent is touching it. Make one focused pass on {target}: decompose it if it is overly large, tighten its structure, and clear any compiler or linter warnings it produces. Keep behaviour identical and every test passing, and prefer to touch only this file."
     );
-    format!("cd {repo} && claude '{prompt}'")
+    format!("cd {repo} && {}", agent.run_cmd(&prompt))
 }
 
 /// Pipe the AppleScript to `osascript` on stdin, exactly as the shell heredoc did.
@@ -480,26 +495,36 @@ mod tests {
     #[test]
     fn applescript_lists_one_command_per_pane() {
         let work = vec![("id-1".to_string(), "task one".to_string())];
-        let s = applescript("/repo", "/bin/sauron", 3, &work, &[]);
+        let s = applescript("/repo", "/bin/sauron", 3, &work, &[], Agent::Claude);
         // First hobbit pane resumes the working task; the rest are bare claude.
         assert!(s.contains("cd /repo && claude --resume id-1"));
         assert_eq!(s.matches("cd /repo && claude").count(), 3); // resume line counts too
-        // The sauron pane runs this binary against the repo.
-        assert!(s.contains("cd /repo && /bin/sauron"));
+        // The sauron pane runs this binary against the repo, watching the agent.
+        assert!(s.contains("cd /repo && /bin/sauron --claude"));
         assert!(s.contains("set leftCmds to {\"cd /repo && claude --resume id-1\", "));
     }
 
     #[test]
     fn applescript_stacks_orcs_beneath_sauron() {
         let work = vec![("id-1".into(), "t".into())];
-        let orcs = vec![orc_command("/repo", "src/big.rs")];
-        let s = applescript("/repo", "/bin/sauron", 2, &work, &orcs);
-        assert!(s.contains("cd /repo && /bin/sauron")); // sauron on top-right
+        let orcs = vec![orc_command("/repo", "src/big.rs", Agent::Claude)];
+        let s = applescript("/repo", "/bin/sauron", 2, &work, &orcs, Agent::Claude);
+        assert!(s.contains("cd /repo && /bin/sauron --claude")); // watcher on top-right
         assert!(s.contains("claude --resume id-1")); // a hobbit on the left
         assert!(s.contains("src/big.rs")); // the orc's target
         // The orc rides in the right column, and a shell still trails it.
         assert!(s.contains("set rightCmds to {\"cd /repo && claude 'This file is safe"));
         assert!(s.contains("'This file is safe to refactor"));
+    }
+
+    #[test]
+    fn codex_agent_swaps_the_spawn_commands() {
+        let work = vec![("id-1".into(), "t".into())];
+        let orcs = vec![orc_command("/repo", "src/big.rs", Agent::Codex)];
+        let s = applescript("/repo", "/bin/sauron", 1, &work, &orcs, Agent::Codex);
+        assert!(s.contains("codex resume id-1")); // hobbit resumes via codex
+        assert!(s.contains("codex exec 'This file is safe")); // orc runs codex exec
+        assert!(s.contains("/bin/sauron --codex")); // watcher pane watches codex
     }
 
     #[test]
@@ -514,7 +539,7 @@ mod tests {
 
     #[test]
     fn orc_command_targets_the_file_without_double_quotes() {
-        let c = orc_command("/repo", "src/big.rs");
+        let c = orc_command("/repo", "src/big.rs", Agent::Claude);
         assert!(c.starts_with("cd /repo && claude '"));
         assert!(c.contains("src/big.rs"));
         // No double quotes, or it would break the AppleScript string it sits in.

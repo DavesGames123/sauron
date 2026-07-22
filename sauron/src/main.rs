@@ -15,12 +15,16 @@
 //!   fn App::refresh     -- rescan logs and rebuild rows
 //!   fn main             -- terminal lifecycle and event loop
 
+mod agent;
+mod codex;
 mod model;
 mod scan;
 mod scene;
 mod store;
 mod ui;
 mod workspace;
+
+use agent::Agent;
 
 use std::collections::BTreeMap;
 use std::os::unix::process::CommandExt;
@@ -96,14 +100,14 @@ struct App {
 }
 
 impl App {
-    fn new(repo_root: PathBuf) -> Self {
+    fn new(repo_root: PathBuf, agent: Agent) -> Self {
         let repo_label = repo_root
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| repo_root.to_string_lossy().into_owned());
 
         let mut app = Self {
-            scanner: Scanner::new(repo_root),
+            scanner: Scanner::new(repo_root, agent),
             store: AckStore::load(),
             rows: Vec::new(),
             hidden_stale: 0,
@@ -442,9 +446,9 @@ fn base64(input: &[u8]) -> String {
 /// background agent it spawned (`Delegated`) -- as `(session_id, display_name)`.
 /// The same set `--list-working` prints and the TUI shows, so `sauron workspace`
 /// reopens exactly the sessions the tool counts as live.
-fn in_flight_tasks(repo_root: PathBuf) -> Vec<(String, String)> {
+fn in_flight_tasks(repo_root: PathBuf, agent: Agent) -> Vec<(String, String)> {
     let repo_root = repo_root.canonicalize().unwrap_or(repo_root);
-    App::new(repo_root)
+    App::new(repo_root, agent)
         .rows
         .iter()
         .filter(|r| matches!(r.status, Status::Working | Status::Delegated))
@@ -455,10 +459,10 @@ fn in_flight_tasks(repo_root: PathBuf) -> Vec<(String, String)> {
 /// Repo-relative paths an *active* session is touching -- working, delegated,
 /// blocked, or holding untested edits. This is the "hot" set an orc must steer
 /// clear of, so its single-shot refactor never collides with a hobbit's work.
-fn hot_files(repo_root: PathBuf) -> std::collections::BTreeSet<String> {
+fn hot_files(repo_root: PathBuf, agent: Agent) -> std::collections::BTreeSet<String> {
     let repo_root = repo_root.canonicalize().unwrap_or(repo_root);
     let mut hot = std::collections::BTreeSet::new();
-    for r in &App::new(repo_root).rows {
+    for r in &App::new(repo_root, agent).rows {
         if matches!(
             r.status,
             Status::Working | Status::Delegated | Status::Blocked | Status::NeedsTest
@@ -472,10 +476,20 @@ fn hot_files(repo_root: PathBuf) -> std::collections::BTreeSet<String> {
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // Which agent to watch: an explicit `--claude`/`--codex` flag; otherwise
+    // `$SAURON_AGENT`, then auto-detect (resolved once the repo is known).
+    let explicit_agent = if args.iter().any(|a| a == "--codex") {
+        Some(Agent::Codex)
+    } else if args.iter().any(|a| a == "--claude") {
+        Some(Agent::Claude)
+    } else {
+        None
+    };
+
     // `sauron workspace ...` -- open or manage the multi-agent iTerm layout.
     // Handled before the repo/TUI path since it has its own argument grammar.
     if args.first().map(|s| s.as_str()) == Some("workspace") {
-        return workspace::run(&args[1..]);
+        return workspace::run(&args[1..], explicit_agent);
     }
 
     let once = args.iter().any(|a| a == "--once");
@@ -486,12 +500,14 @@ fn main() -> std::io::Result<()> {
         None => git_root().unwrap_or(std::env::current_dir()?),
     };
     let repo_root = repo_root.canonicalize().unwrap_or(repo_root);
+    let agent = Agent::select(explicit_agent, &repo_root);
 
-    let mut app = App::new(repo_root);
+    let mut app = App::new(repo_root, agent);
 
     if !app.scanner.log_dir().exists() {
         eprintln!(
-            "no Claude Code session logs for {}\n  looked in: {}",
+            "no {} session logs for {}\n  looked in: {}",
+            agent.label(),
             app.scanner.repo_root().display(),
             app.scanner.log_dir().display()
         );

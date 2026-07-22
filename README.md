@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🛰️ agentwatch
+# 🛰️ sauron
 
 ### Know what your agents changed — before you ship it.
 
@@ -18,7 +18,7 @@ A read-only sidecar for running **many [Claude Code](https://claude.com/claude-c
 <br>
 
 ```
-┌─ agentwatch ─────────────────────────────────────────────┐
+┌─ sauron ─────────────────────────────────────────────┐
 │  ● letters-redesign    NEEDS TEST   src/gui/letters.rs    │
 │  ▲ flora-field-tick    BLOCKED      waiting on you        │
 │  ● combat-armory       NEEDS TEST   3 files               │
@@ -34,7 +34,7 @@ A read-only sidecar for running **many [Claude Code](https://claude.com/claude-c
 When you fan out a swarm of coding agents, the bottleneck stops being *writing*
 code and becomes *trusting* it. Which sessions actually touched the repo? Which
 are quietly **blocked on a question only you can answer**? What have you already
-reviewed? **agentwatch** answers exactly that — and nothing else.
+reviewed? **sauron** answers exactly that — and nothing else.
 
 It reads the Claude Code session logs under
 `~/.claude/projects/<repo>/*.jsonl`, re-tailing every two seconds. It **writes
@@ -46,7 +46,7 @@ nothing to your repo** and **never talks to a running agent**.
 <tr>
 <td width="50%" valign="top">
 
-### 🛰️ `agentwatch`
+### 🛰️ `sauron`
 The terminal sidecar. One question, answered live:
 > *what did my agents change that I haven't tested yet?*
 
@@ -63,7 +63,7 @@ The macOS/iTerm2 launcher. One command, a whole cockpit:
 
 - Opens a **fullscreen layout on its own Space**
 - A column of **bare `claude` panes** (pick how many)
-- `agentwatch` wired into the top-right, shells below
+- `sauron` wired into the top-right, shells below
 - Panes stay evenly sized no matter the agent count
 
 </td>
@@ -76,19 +76,19 @@ The macOS/iTerm2 launcher. One command, a whole cockpit:
 
 ```bash
 # 1 · build the sidecar
-cargo build --release --manifest-path agentwatch/Cargo.toml
+cargo build --release --manifest-path sauron/Cargo.toml
 
 # 2 · watch the repo you're standing in
-./agentwatch/target/release/agentwatch
+./sauron/target/release/sauron
 
 # …or watch a specific repo
-./agentwatch/target/release/agentwatch /path/to/repo
+./sauron/target/release/sauron /path/to/repo
 ```
 
 Drop it on your `PATH` to call it from anywhere:
 
 ```bash
-cp agentwatch/target/release/agentwatch /usr/local/bin/
+cp sauron/target/release/sauron /usr/local/bin/
 ```
 
 ---
@@ -119,11 +119,11 @@ WORKSPACE_REPO=/path workspace/workspace.sh   # a specific repo
 
 It spins up a new iTerm2 window, throws it into native fullscreen (which gives
 it its own macOS Space), then splits it into a left column of `claude` panes and
-a right column with `agentwatch` on top.
+a right column with `sauron` on top.
 
 By default the launcher looks for the binary next to this repo
-(`agentwatch/target/release/agentwatch`). Override with `AGENTWATCH=/path`, or
-just put `agentwatch` on your `PATH`.
+(`sauron/target/release/sauron`). Override with `SAURON=/path`, or
+just put `sauron` on your `PATH`.
 
 <details>
 <summary><b>Requirements</b></summary>
@@ -147,7 +147,7 @@ Claude Code encodes a project path by swapping separators for dashes:
 /Users/you/code/my-repo   →   ~/.claude/projects/-Users-you-code-my-repo/
 ```
 
-agentwatch folds each session's `file-history-delta` records into a per-session
+sauron folds each session's `file-history-delta` records into a per-session
 edit set, subtracts what you've acknowledged, and shows the remainder.
 Acknowledgements live in a small state file, so restarting never loses your
 place.
@@ -157,7 +157,7 @@ place.
 ## 🗂️ Layout
 
 ```
-agentwatch/   ·  Rust crate — the TUI sidecar
+sauron/   ·  Rust crate — the TUI sidecar
 workspace/    ·  iTerm2 multi-agent launcher
 ```
 

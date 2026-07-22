@@ -11,6 +11,7 @@
 //!   fn header          -- repo name and the status tally
 //!   fn section_header  -- coloured rule introducing each status group
 //!   fn card            -- one session -> multi-line ListItem
+//!   fn wrap_prompt     -- first lines of your last ask, wrapped for a card
 //!   fn detail          -- selected session's write-set and prompt
 //!   fn dim_common      -- shared directory prefix compression for path lists
 //!   const AMBER/CYAN   -- the status palette
@@ -35,6 +36,17 @@ const GREEN: Color = Color::Rgb(126, 200, 120); // nothing outstanding
 const BLUE: Color = Color::Rgb(120, 170, 255); // chrome / repo identity
 const DIM: Color = Color::Rgb(88, 94, 104);
 const INK: Color = Color::Rgb(18, 20, 24); // text on a filled badge
+const SAID: Color = Color::Rgb(158, 166, 178); // your last words, quoted back on a card
+const FILE: Color = Color::Rgb(214, 220, 228); // a modified file, named clearly
+const PREVIEW: Color = Color::Rgb(132, 140, 152); // its most recent lines of text
+
+// The Eye of Sauron and its engraved verse. Kept apart from the status palette
+// above -- this is chrome flavour, never a signal, so it must not borrow a hue
+// that means something.
+const FLAME: Color = Color::Rgb(255, 122, 24); // the lidless eye, wreathed in fire
+const EMBER: Color = Color::Rgb(120, 22, 10); // the slit pupil, a hole in the flame
+const FLARE: Color = Color::Rgb(255, 176, 60); // the eye flaring wide
+const RUNE: Color = Color::Rgb(150, 70, 40); // the ring-verse, engraved and faint
 
 pub fn color_of(status: Status) -> Color {
     match status {
@@ -66,6 +78,10 @@ pub struct View<'a> {
     pub clear_count: usize,
     pub show_clear: bool,
     pub copied: bool,
+    /// Milliseconds since launch, the clock the Eye and the ring-verse animate
+    /// off. Derived, not stored in App: the whole animation is a pure function
+    /// of this, so nothing has to be ticked or remembered between frames.
+    pub anim_ms: u64,
 }
 
 /// Screen geometry of the last-drawn list, so a mouse click can be resolved to
@@ -108,7 +124,7 @@ fn header(f: &mut Frame, area: Rect, v: &View) {
             format!(" {} ", v.repo),
             Style::default().fg(BLUE).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("agentwatch", Style::default().fg(DIM)),
+        Span::styled("sauron", Style::default().fg(DIM)),
         Span::raw("   "),
     ];
 
@@ -172,11 +188,116 @@ fn header(f: &mut Frame, area: Rect, v: &View) {
         Style::default().fg(DIM),
     ));
 
-    let rule = Span::styled("─".repeat(area.width as usize), Style::default().fg(DIM));
     f.render_widget(
-        Paragraph::new(vec![Line::from(top), Line::from(rule)]),
+        Paragraph::new(vec![
+            Line::from(top),
+            engraved_rule(area.width as usize, v.anim_ms),
+        ]),
         area,
     );
+}
+
+/// One pose of the lidless Eye. It is drawn in a fixed five glyphs -- two lashes
+/// around a three-cell iris -- so the pupil can slide left/right without the
+/// header reflowing, and a blink or a widening swaps glyphs in place.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Eye {
+    Center,
+    Left,
+    Right,
+    Blink,
+    Wide,
+}
+
+/// The Eye's gaze on a 12-second loop: mostly staring you down, glancing aside
+/// now and then, blinking, once flaring wide -- and a double-blink that reads as
+/// a wink. A pure function of the clock, so the schedule is testable and no
+/// per-frame state has to live anywhere.
+fn eye_pose(ms: u64) -> Eye {
+    match ms % 12_000 {
+        0..=2_399 => Eye::Center,
+        2_400..=2_699 => Eye::Blink,
+        2_700..=4_699 => Eye::Left,
+        4_700..=6_899 => Eye::Center,
+        6_900..=7_049 => Eye::Blink, // \
+        7_050..=7_199 => Eye::Center, //  > two quick blinks -- a wink
+        7_200..=7_349 => Eye::Blink, // /
+        7_350..=9_499 => Eye::Right,
+        9_500..=11_499 => Eye::Center,
+        11_500..=11_799 => Eye::Wide, // wary flare before it settles again
+        _ => Eye::Center,
+    }
+}
+
+/// The Eye as coloured spans: fiery lashes and iris, a dark slit for the pupil.
+/// Always exactly five glyphs wide.
+fn eye(ms: u64) -> Vec<Span<'static>> {
+    let flame = Style::default().fg(FLAME);
+    let pupil = Style::default().fg(EMBER);
+    let wide = Style::default().fg(FLARE).add_modifier(Modifier::BOLD);
+    let (l, r, cells): (&str, &str, [(&str, Style); 3]) = match eye_pose(ms) {
+        Eye::Center => ("‹", "›", [("▒", flame), ("▮", pupil), ("▒", flame)]),
+        Eye::Left => ("‹", "›", [("▮", pupil), ("▒", flame), ("▒", flame)]),
+        Eye::Right => ("‹", "›", [("▒", flame), ("▒", flame), ("▮", pupil)]),
+        Eye::Blink => ("‹", "›", [("─", flame), ("─", flame), ("─", flame)]),
+        Eye::Wide => ("«", "»", [("▓", wide), ("▮", pupil), ("▓", wide)]),
+    };
+    let mut spans = Vec::with_capacity(5);
+    spans.push(Span::styled(l, flame));
+    for (g, st) in cells {
+        spans.push(Span::styled(g, st));
+    }
+    spans.push(Span::styled(r, flame));
+    spans
+}
+
+/// The One Ring's verse in the Black Speech -- the tongue Sauron set in Elvish
+/// letters -- one line at a time, advancing every four seconds. In order it
+/// reads: "one Ring to rule them all, one Ring to find them, one Ring to bring
+/// them all, and in the darkness bind them."
+fn inscription(ms: u64) -> &'static str {
+    const LINES: [&str; 4] = [
+        "ash nazg durbatulûk",
+        "ash nazg gimbatul",
+        "ash nazg thrakatulûk",
+        "agh burzum-ishi krimpatul",
+    ];
+    LINES[((ms / 4_000) % 4) as usize]
+}
+
+/// The divider under the header, engraved like the Ring in the fire: a line of
+/// the inscription with the Eye burning at the right margin. Falls back to a
+/// plain rule when the terminal is too narrow for the verse or the Eye.
+fn engraved_rule(width: usize, ms: u64) -> Line<'static> {
+    const EYE_W: usize = 5;
+    let motto = inscription(ms);
+    let motto_w = motto.chars().count();
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if width >= motto_w + EYE_W + 13 {
+        // "── " + motto + " " + fill + " " + eye
+        let fill = width - motto_w - EYE_W - 5;
+        spans.push(Span::styled("──", Style::default().fg(DIM)));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(motto, Style::default().fg(RUNE)));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled("─".repeat(fill), Style::default().fg(DIM)));
+        spans.push(Span::raw(" "));
+    } else if width >= EYE_W + 2 {
+        spans.push(Span::styled(
+            "─".repeat(width - EYE_W - 1),
+            Style::default().fg(DIM),
+        ));
+        spans.push(Span::raw(" "));
+    } else {
+        // No room even for the Eye -- just rule the full width.
+        return Line::from(Span::styled(
+            "─".repeat(width),
+            Style::default().fg(DIM),
+        ));
+    }
+    spans.extend(eye(ms));
+    Line::from(spans)
 }
 
 fn list(f: &mut Frame, area: Rect, v: &View, list_state: &mut ListState, geo: &mut FrameGeometry) {
@@ -319,21 +440,12 @@ fn card(row: &Row, selected: bool, now: i64, width: usize) -> ListItem<'static> 
             .unwrap_or("turn ended on a failure")
             .to_string()
     } else if row.status == Status::Blocked {
-        let why = row
-            .blocked_reason
+        // The ask itself is now quoted above the summary, so this line is just
+        // the reason it is stalled -- no longer a second copy of the prompt.
+        row.blocked_reason
             .map(|r| r.short())
-            .unwrap_or("waiting on you");
-        match &row.last_prompt {
-            Some(p) => format!(
-                "{} · {}",
-                why,
-                truncate(
-                    &crate::model::collapse_ws(p),
-                    width.saturating_sub(why.len() + 10)
-                )
-            ),
-            None => why.to_string(),
-        }
+            .unwrap_or("waiting on you")
+            .to_string()
     } else if row.pending.is_empty() {
         format!("{} file(s) · all acked", row.total_edits)
     } else {
@@ -344,13 +456,140 @@ fn card(row: &Row, selected: bool, now: i64, width: usize) -> ListItem<'static> 
         )
     };
 
-    let second = Line::from(vec![
-        marker,
-        Span::raw("   "),
-        Span::styled(summary, Style::default().fg(detail_color)),
-    ]);
+    // Quote the last thing you told this session, up to three lines, right under
+    // its name -- the quickest way to reload what you had in mind for it without
+    // switching to its terminal.
+    let mut lines = vec![first];
+    if let Some(prompt) = &row.last_prompt {
+        for pl in wrap_prompt(prompt, width.saturating_sub(7), 3) {
+            lines.push(Line::from(vec![
+                Span::raw("     "),
+                Span::styled("▌ ", Style::default().fg(DIM)),
+                Span::styled(pl, Style::default().fg(SAID)),
+            ]));
+        }
+    }
 
-    ListItem::new(vec![first, second, Line::raw("")])
+    // The selected card opens up: every modified file gets its own line, named
+    // plainly, with the most recent lines written to it shown underneath -- so
+    // re-orienting on the active session never means switching to its terminal.
+    // Unselected cards stay a single summary line, or the list stops being
+    // scannable, which is the whole thing this tool is for.
+    if selected && !row.pending.is_empty() {
+        const MAX_FILES: usize = 4;
+        const MAX_PREVIEW: usize = 2;
+        for path in row.pending.iter().take(MAX_FILES) {
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(
+                    path.clone(),
+                    Style::default().fg(FILE).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            for pl in row.previews.get(path).into_iter().flatten().take(MAX_PREVIEW) {
+                lines.push(Line::from(vec![
+                    Span::raw("     "),
+                    Span::styled("│ ", Style::default().fg(DIM)),
+                    Span::styled(
+                        truncate(pl.trim_end(), width.saturating_sub(7)),
+                        Style::default().fg(PREVIEW),
+                    ),
+                ]));
+            }
+        }
+        if row.pending.len() > MAX_FILES {
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(
+                    format!("… and {} more", row.pending.len() - MAX_FILES),
+                    Style::default().fg(DIM),
+                ),
+            ]));
+        }
+    } else {
+        lines.push(Line::from(vec![
+            marker,
+            Span::raw("   "),
+            Span::styled(summary, Style::default().fg(detail_color)),
+        ]));
+    }
+    lines.push(Line::raw(""));
+    ListItem::new(lines)
+}
+
+/// The first `max_lines` display lines of a prompt, wrapped to `width`. Hard
+/// line breaks in the message are honoured, blank lines are dropped (they carry
+/// nothing for a re-brief), an over-long word is split rather than overflowing,
+/// and if the message runs past the cap the last kept line ends in an ellipsis
+/// so the truncation is visible rather than silent.
+fn wrap_prompt(prompt: &str, width: usize, max_lines: usize) -> Vec<String> {
+    let width = width.max(8);
+    let cap = max_lines + 1; // wrap one extra line so overflow is detectable
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+
+    'outer: for raw in prompt.lines() {
+        let line = crate::model::collapse_ws(raw);
+        if line.is_empty() {
+            continue;
+        }
+        for word in line.split(' ') {
+            let mut word = word.to_string();
+            // A single word wider than the card: hard-split it across lines.
+            while word.chars().count() > width {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                    if out.len() >= cap {
+                        break 'outer;
+                    }
+                }
+                out.push(word.chars().take(width).collect());
+                if out.len() >= cap {
+                    break 'outer;
+                }
+                word = word.chars().skip(width).collect();
+            }
+            let need = if cur.is_empty() {
+                word.chars().count()
+            } else {
+                cur.chars().count() + 1 + word.chars().count()
+            };
+            if need > width {
+                out.push(std::mem::take(&mut cur));
+                cur = word;
+                if out.len() >= cap {
+                    break 'outer;
+                }
+            } else if cur.is_empty() {
+                cur = word;
+            } else {
+                cur.push(' ');
+                cur.push_str(&word);
+            }
+        }
+        // A hard line break in the source ends the current display line.
+        if !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+            if out.len() >= cap {
+                break 'outer;
+            }
+        }
+    }
+    if !cur.is_empty() && out.len() < cap {
+        out.push(cur);
+    }
+
+    let truncated = out.len() > max_lines;
+    out.truncate(max_lines);
+    if truncated {
+        if let Some(last) = out.last_mut() {
+            while last.chars().count() > width.saturating_sub(1) {
+                last.pop();
+            }
+            last.push('…');
+        }
+    }
+    out
 }
 
 fn detail(f: &mut Frame, area: Rect, row: Option<&Row>, now: i64) {
@@ -584,5 +823,105 @@ mod tests {
         // Errored must not read as Blocked -- the whole point is that a dead
         // agent is a different thing from a polite "waiting on you".
         assert_ne!(color_of(Status::Errored), color_of(Status::Blocked));
+    }
+
+    #[test]
+    fn eye_timeline_hits_each_pose_and_loops() {
+        assert_eq!(eye_pose(0), Eye::Center);
+        assert_eq!(eye_pose(2_500), Eye::Blink);
+        assert_eq!(eye_pose(3_000), Eye::Left);
+        assert_eq!(eye_pose(8_000), Eye::Right);
+        assert_eq!(eye_pose(11_600), Eye::Wide);
+        // The whole act repeats every 12 seconds -- the animation carries no
+        // state, so the same clock phase must always give the same pose.
+        assert_eq!(eye_pose(3_000), eye_pose(3_000 + 12_000));
+    }
+
+    #[test]
+    fn eye_is_always_five_glyphs() {
+        // The header reserves exactly five cells; a pose that drew more or fewer
+        // would push the divider around every blink.
+        for ms in [0u64, 2_500, 3_000, 8_000, 11_600, 999_999] {
+            assert_eq!(eye(ms).len(), 5, "pose at {ms}ms was not five glyphs");
+        }
+    }
+
+    #[test]
+    fn header_engraves_the_verse_and_burns_the_eye() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        let view = View {
+            rows: &[],
+            selected: 0,
+            now: 0,
+            repo: "demo",
+            saved: false,
+            hidden_stale: 0,
+            clear_count: 0,
+            show_clear: false,
+            copied: false,
+            anim_ms: 0, // clock phase 0 -> Eye centred, verse on its first line
+        };
+        let mut ls = ListState::default();
+        let mut geo = FrameGeometry::default();
+        terminal
+            .draw(|f| draw(f, &view, &mut ls, &mut geo))
+            .unwrap();
+
+        // Row 1 is the engraved divider: the ring-verse plus the lidless Eye.
+        let buf = terminal.backend().buffer();
+        let mut rule = String::new();
+        for x in 0..80u16 {
+            rule.push_str(buf[(x, 1)].symbol());
+        }
+        assert!(rule.contains("ash nazg durbatulûk"), "verse missing: {rule:?}");
+        assert!(
+            rule.contains('‹') && rule.contains('▮') && rule.contains('›'),
+            "Eye missing: {rule:?}"
+        );
+    }
+
+    #[test]
+    fn wrap_prompt_wraps_a_long_line_and_keeps_the_first_few() {
+        let p = "refactor the auth middleware to use the new token store";
+        let out = wrap_prompt(p, 20, 3);
+        assert!(out.len() <= 3);
+        assert!(out.iter().all(|l| l.chars().count() <= 20), "over width: {out:?}");
+        assert!(out[0].starts_with("refactor"));
+    }
+
+    #[test]
+    fn wrap_prompt_honours_hard_breaks_and_drops_blank_lines() {
+        // Blank lines carry nothing for a re-brief, so they are skipped, and the
+        // three real lines survive intact -- no ellipsis, since nothing is cut.
+        let p = "first line\n\n\nsecond line\nthird line";
+        assert_eq!(
+            wrap_prompt(p, 40, 3),
+            vec!["first line", "second line", "third line"]
+        );
+    }
+
+    #[test]
+    fn wrap_prompt_marks_overflow_visibly() {
+        let out = wrap_prompt("l1\nl2\nl3\nl4", 40, 3);
+        assert_eq!(out.len(), 3);
+        assert!(out[2].ends_with('…'), "overflow must be marked: {:?}", out[2]);
+    }
+
+    #[test]
+    fn wrap_prompt_of_only_whitespace_is_empty() {
+        assert!(wrap_prompt("   \n\t\n  ", 40, 3).is_empty());
+    }
+
+    #[test]
+    fn inscription_cycles_the_four_ring_lines() {
+        assert_eq!(inscription(0), "ash nazg durbatulûk");
+        assert_eq!(inscription(4_000), "ash nazg gimbatul");
+        assert_eq!(inscription(8_000), "ash nazg thrakatulûk");
+        assert_eq!(inscription(12_000), "agh burzum-ishi krimpatul");
+        // Four lines at four seconds each -- the verse restarts at 16s.
+        assert_eq!(inscription(16_000), inscription(0));
     }
 }

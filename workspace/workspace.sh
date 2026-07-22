@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # workspace — open a fullscreen iTerm2 multi-agent layout on its own macOS Space.
 #
-# Left column  : one pane per currently-working agentwatch task, each resumed
+# Left column  : one pane per currently-working sauron task, each resumed
 #                with `claude --resume <session-id>`, split evenly (each pane =
 #                1/N height, so window scale is proportional to the agent count).
 #                Any panes beyond the working-task count are bare `claude`.
-# Right column : agentwatch (top) + two plain shells at the repo root.
+# Right column : sauron (top) + two plain shells at the repo root.
 #
-# "Currently working" is whatever agentwatch counts as Working — it is queried
-# via `agentwatch --list-working`, so the set can never drift from the TUI.
+# "Currently working" is whatever sauron counts as Working — it is queried
+# via `sauron --list-working`, so the set can never drift from the TUI.
 #
 # The window is put into native fullscreen via the Accessibility AXFullScreen
 # attribute *before* splitting — macOS assigns a native-fullscreen window its own
@@ -34,11 +34,26 @@ set -euo pipefail
 # the cwd, falling back to the cwd itself. Override with WORKSPACE_REPO.
 REPO="${WORKSPACE_REPO:-$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || pwd)}"
 
-# Path to the built agentwatch binary. Defaults to the copy built alongside this
-# script (../agentwatch/target/release/agentwatch relative to this repo).
-# Override with AGENTWATCH, or put `agentwatch` on your PATH.
+# Path to the sauron binary. Prefer the copy built alongside this script (the
+# freshest build), then fall back to whatever `sauron` is on PATH -- e.g. from
+# `cargo install --path sauron`, which drops it in ~/.cargo/bin -- so the
+# launcher keeps working from a moved, clean, or relocated checkout instead of
+# depending on a build living at one exact relative path. Override with SAURON.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AGENTWATCH="${AGENTWATCH:-$SCRIPT_DIR/../agentwatch/target/release/agentwatch}"
+LOCAL_SAURON="$SCRIPT_DIR/../sauron/target/release/sauron"
+if [[ -n "${SAURON:-}" ]]; then
+  : # explicit override wins, untouched
+elif command -v sauron >/dev/null 2>&1; then
+  # An installed copy (`cargo install --path sauron` -> ~/.cargo/bin) has a
+  # stable absolute path, so the command this launcher bakes into each iTerm
+  # pane keeps resolving after the repo is moved or a window is restored --
+  # which a path into the build tree does not. This is the durable default.
+  SAURON="$(command -v sauron)"
+elif [[ -x "$LOCAL_SAURON" ]]; then
+  SAURON="$LOCAL_SAURON" # no install yet: fall back to a fresh local build
+else
+  SAURON="$LOCAL_SAURON" # nothing built -> the "not built" hint points here
+fi
 
 # Accept:  workspace | workspace init | workspace 8 | workspace init 8
 [[ "${1:-}" == "init" ]] && shift || true
@@ -57,10 +72,10 @@ fi
 
 # Pull the working tasks (id<TAB>name per line). Missing/unbuilt binary -> none.
 WORK=()
-if [[ -x "$AGENTWATCH" ]]; then
+if [[ -x "$SAURON" ]]; then
   while IFS= read -r line; do
     [[ -n "$line" ]] && WORK+=("$line")
-  done < <("$AGENTWATCH" "$REPO" --list-working 2>/dev/null || true)
+  done < <("$SAURON" "$REPO" --list-working 2>/dev/null || true)
 fi
 W=${#WORK[@]}
 
@@ -73,11 +88,11 @@ else
   TOTAL=4
 fi
 
-# Right-column top pane runs agentwatch if built, else a note.
-if [[ -x "$AGENTWATCH" ]]; then
-  AGENTWATCH_CMD="$AGENTWATCH"
+# Right-column top pane runs sauron if built, else a note.
+if [[ -x "$SAURON" ]]; then
+  SAURON_CMD="$SAURON"
 else
-  AGENTWATCH_CMD="echo 'agentwatch not built — run: cargo build --release --manifest-path $SCRIPT_DIR/../agentwatch/Cargo.toml'"
+  SAURON_CMD="echo 'sauron not built — run: cargo build --release --manifest-path $SCRIPT_DIR/../sauron/Cargo.toml'"
 fi
 
 # Build the AppleScript list of per-pane commands: working tasks (resumed) first,
@@ -120,7 +135,7 @@ tell application "iTerm2"
   tell rTop    to set rMid to (split horizontally with default profile)
   tell rMid    to set rBot to (split horizontally with default profile)
 
-  tell rTop to write text "cd ${REPO} && ${AGENTWATCH_CMD}"
+  tell rTop to write text "cd ${REPO} && ${SAURON_CMD}"
   tell rMid to write text "cd ${REPO}"
   tell rBot to write text "cd ${REPO}"
 

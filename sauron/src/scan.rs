@@ -249,6 +249,85 @@ fn fold_record(session: &mut Session, v: &Value, repo_root: &Path) {
         }
         _ => {}
     }
+
+    // Tool results ride on `user` records regardless of the write-set deltas, so
+    // harvest the edited text here, outside the `kind` match.
+    fold_edit_preview(session, v, repo_root);
+}
+
+/// Capture the actual text of an Edit/Write from its tool result, keyed by the
+/// same repo-relative path as the write-set, so a selected card can preview the
+/// most recent lines written to each file. A newer result supersedes an older
+/// one; a result with no usable text is ignored.
+fn fold_edit_preview(session: &mut Session, v: &Value, repo_root: &Path) {
+    let Some(tur) = v.get("toolUseResult").filter(|t| t.is_object()) else {
+        return;
+    };
+    let Some(fp) = tur.get("filePath").and_then(|p| p.as_str()) else {
+        return;
+    };
+    let Some(rel) = repo_relative(fp, repo_root) else {
+        return;
+    };
+    let lines = preview_lines(tur);
+    if lines.is_empty() {
+        return;
+    }
+    let ts = v
+        .get("timestamp")
+        .and_then(|t| t.as_str())
+        .and_then(parse_rfc3339_ms)
+        .unwrap_or(session.last_activity);
+    match session.previews.get(&rel) {
+        // Keep whichever preview is newer; ties fall to the later record.
+        Some((prev_ts, _)) if *prev_ts > ts => {}
+        _ => {
+            session.previews.insert(rel, (ts, lines));
+        }
+    }
+}
+
+/// The most recent lines of text an edit put into a file: the added (`+`) lines
+/// of its structured patch, falling back to the new file contents when there is
+/// no patch. Blank edges are trimmed and the count is capped so one large edit
+/// cannot flood a card.
+fn preview_lines(tur: &Value) -> Vec<String> {
+    const CAP: usize = 8;
+    let mut out: Vec<String> = Vec::new();
+
+    if let Some(hunks) = tur.get("structuredPatch").and_then(|p| p.as_array()) {
+        'hunks: for h in hunks {
+            let Some(lines) = h.get("lines").and_then(|l| l.as_array()) else {
+                continue;
+            };
+            for l in lines.iter().filter_map(|l| l.as_str()) {
+                // Patch lines are prefixed ' '/'+'/'-'; only the added ones are
+                // "the most recent text". Removals and the no-newline marker are
+                // not new content, so they are skipped.
+                if let Some(rest) = l.strip_prefix('+') {
+                    out.push(rest.to_string());
+                    if out.len() >= CAP {
+                        break 'hunks;
+                    }
+                }
+            }
+        }
+    }
+
+    // A pure deletion, or a Write with no patch: fall back to the new content.
+    if out.is_empty() {
+        if let Some(ns) = tur.get("newString").and_then(|s| s.as_str()) {
+            out = ns.lines().take(CAP).map(|s| s.to_string()).collect();
+        }
+    }
+
+    while out.first().map(|s| s.trim().is_empty()).unwrap_or(false) {
+        out.remove(0);
+    }
+    while out.last().map(|s| s.trim().is_empty()).unwrap_or(false) {
+        out.pop();
+    }
+    out
 }
 
 /// Track questions that stop the agent until a human answers.
@@ -380,6 +459,75 @@ mod tests {
         assert_eq!(
             s.last_activity,
             parse_rfc3339_ms("2026-07-21T18:00:00.000Z").unwrap()
+        );
+    }
+
+    #[test]
+    fn harvests_the_added_lines_of_an_edit_and_keeps_the_newest() {
+        let root = Path::new("/repo");
+        let mut s = Session::default();
+
+        // An Edit tool result: the structured patch carries context and added
+        // lines; only the added ones are the "most recent text".
+        fold_record(
+            &mut s,
+            &json!({
+                "type":"user","timestamp":"2026-07-21T17:00:00.000Z",
+                "toolUseResult":{
+                    "filePath":"/repo/src/auth/mod.rs",
+                    "structuredPatch":[{"lines":[
+                        " unchanged context",
+                        "-let store = old();",
+                        "+let store = TokenStore::open()?;",
+                        "+store.check(tok)"
+                    ]}]
+                }
+            }),
+            root,
+        );
+        assert_eq!(
+            s.previews.get("src/auth/mod.rs").map(|(_, l)| l.clone()),
+            Some(vec![
+                "let store = TokenStore::open()?;".to_string(),
+                "store.check(tok)".to_string(),
+            ]),
+            "only added lines, context and removals dropped"
+        );
+
+        // A later edit to the same file supersedes the earlier preview.
+        fold_record(
+            &mut s,
+            &json!({
+                "type":"user","timestamp":"2026-07-21T18:00:00.000Z",
+                "toolUseResult":{
+                    "filePath":"/repo/src/auth/mod.rs",
+                    "structuredPatch":[{"lines":["+fn newer() {}"]}]
+                }
+            }),
+            root,
+        );
+        assert_eq!(
+            s.previews.get("src/auth/mod.rs").map(|(_, l)| l.clone()),
+            Some(vec!["fn newer() {}".to_string()]),
+            "newer edit wins"
+        );
+
+        // A Write with no patch falls back to the new content.
+        fold_record(
+            &mut s,
+            &json!({
+                "type":"user","timestamp":"2026-07-21T17:30:00.000Z",
+                "toolUseResult":{
+                    "filePath":"/repo/README.md",
+                    "newString":"# Title\n\nbody line\n"
+                }
+            }),
+            root,
+        );
+        assert_eq!(
+            s.previews.get("README.md").map(|(_, l)| l.clone()),
+            Some(vec!["# Title".to_string(), "".to_string(), "body line".to_string()]),
+            "no patch -> new content, blank edges trimmed"
         );
     }
 

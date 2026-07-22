@@ -1,10 +1,10 @@
 [package]
-name = "agentwatch"
+name = "sauron"
 version = "0.1.0"
 edition = "2021"
 
 # Standalone sidecar with its own lockfile. Keep it out of any parent Cargo
-# workspace -- building agentwatch must never perturb the host project's build.
+# workspace -- building sauron must never perturb the host project's build.
 
 [dependencies]
 # ratatui re-exports the crossterm version it was built against; depending on

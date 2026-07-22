@@ -36,7 +36,7 @@ pub struct AckStore {
 
 impl AckStore {
     pub fn load() -> Self {
-        let dir = home().join(".claude").join("agentwatch");
+        let dir = home().join(".claude").join("sauron");
         let path = dir.join("acks.json");
         let dismissed_path = dir.join("dismissed.json");
         let acks = std::fs::read_to_string(&path)

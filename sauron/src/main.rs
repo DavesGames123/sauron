@@ -1,4 +1,4 @@
-//! agentwatch -- a sidecar that answers one question: what did my agents change
+//! sauron -- a sidecar that answers one question: what did my agents change
 //! that I have not tested yet?
 //!
 //! Everything it shows is read out of the Claude Code session logs at
@@ -6,8 +6,8 @@
 //! and never talks to a running agent.
 //!
 //! Usage:
-//!   agentwatch                  # watch the repo containing the cwd
-//!   agentwatch /path/to/repo    # watch a specific repo
+//!   sauron                  # watch the repo containing the cwd
+//!   sauron /path/to/repo    # watch a specific repo
 //!
 //! grep targets:
 //!   struct Row          -- one session flattened for rendering
@@ -39,6 +39,11 @@ use store::AckStore;
 /// How often the logs are re-tailed. Only appended bytes are parsed, so this is
 /// cheap even with 10MB session files.
 const TICK: Duration = Duration::from_millis(2000);
+// The data only changes on TICK, but the Eye of Sauron animates far faster, so
+// the loop wakes on this shorter frame clock to redraw. ratatui diffs the
+// buffer and writes only changed cells, so an idle frame -- the Eye holding
+// still -- costs nothing on the wire.
+const FRAME: Duration = Duration::from_millis(120);
 
 #[derive(Debug, Clone)]
 pub struct Row {
@@ -58,6 +63,9 @@ pub struct Row {
     /// `cd <cwd> && claude --resume <id>` -- reattach a dropped thread.
     pub continue_cmd: String,
     pub edits: BTreeMap<String, i64>,
+    /// Repo-relative path -> the most recent lines of text written to it, for the
+    /// selected card's per-file preview. Keyed like `pending`.
+    pub previews: BTreeMap<String, Vec<String>>,
 }
 
 struct App {
@@ -223,6 +231,13 @@ impl App {
             total_edits: s.edits.len(),
             last_prompt: s.last_prompt.clone(),
             continue_cmd: s.continue_command(),
+            // Drop the per-file timestamp here -- it did its job ordering the
+            // previews during the fold; the card only needs the lines.
+            previews: s
+                .previews
+                .into_iter()
+                .map(|(path, (_, lines))| (path, lines))
+                .collect(),
             edits: s.edits,
         })
     }
@@ -452,7 +467,7 @@ fn main() -> std::io::Result<()> {
         return Ok(());
     }
 
-    // Headless list of the sessions agentwatch currently counts as Working, one
+    // Headless list of the sessions sauron currently counts as Working, one
     // per line as `session_id<TAB>display_name`. Consumed by the `workspace`
     // tool to reopen each in-flight agent (`claude --resume <id>`) into a pane.
     // Working = mid-turn and not stuck, i.e. the same "◐ working" set the TUI
@@ -479,6 +494,9 @@ fn main() -> std::io::Result<()> {
     // Shift to select while this runs.
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let mut last_tick = Instant::now();
+    // Launch instant: the Eye's animation is a pure function of elapsed ms off
+    // this, so nothing about the animation has to be stored or advanced by hand.
+    let anim_start = Instant::now();
     // Remember the binary's mtime at launch. When a rebuild lands (cargo writes
     // via atomic rename, so the mtime jumps once), the loop re-execs the new
     // binary in place -- no more staring at a stale build after a rebuild.
@@ -504,6 +522,7 @@ fn main() -> std::io::Result<()> {
             clear_count: app.clear_count,
             show_clear: app.show_clear,
             copied,
+            anim_ms: anim_start.elapsed().as_millis() as u64,
         };
         if let Err(e) = terminal.draw(|f| ui::draw(f, &view, &mut list_state, &mut geo)) {
             break Err(e);
@@ -516,8 +535,10 @@ fn main() -> std::io::Result<()> {
         app.list_top = geo.list_top;
         app.list_height = geo.list_height;
 
-        // Poll rather than block so the tick still fires on an idle keyboard.
-        let timeout = TICK.saturating_sub(last_tick.elapsed());
+        // Poll rather than block so the Eye keeps animating on an idle keyboard.
+        // Wake every FRAME to redraw; the once-per-TICK data refresh below is
+        // gated separately, so faster frames never mean more log scanning.
+        let timeout = FRAME.min(TICK.saturating_sub(last_tick.elapsed()));
         match event::poll(timeout) {
             Ok(true) => match event::read() {
                 Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => match k.code {
@@ -653,7 +674,7 @@ fn exe_mtime() -> Option<SystemTime> {
 fn reload() -> std::io::Error {
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agentwatch"));
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sauron"));
     let args: Vec<String> = std::env::args().skip(1).collect();
     std::process::Command::new(exe).args(args).exec()
 }

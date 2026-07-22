@@ -197,6 +197,12 @@ pub struct Session {
     pub error: Option<ErrorKind>,
     /// Repo-relative path -> epoch millis of its most recent write by this session.
     pub edits: BTreeMap<String, i64>,
+    /// Repo-relative path -> `(timestamp, lines)` of the most recent text an
+    /// Edit/Write wrote to it, harvested from the tool result. The timestamp
+    /// lets a newer edit supersede an older preview; the lines are what the
+    /// selected card shows under each file. Keyed like `edits`, so a file's
+    /// preview lines up with its write-set entry.
+    pub previews: BTreeMap<String, (i64, Vec<String>)>,
 }
 
 impl Session {

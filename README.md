@@ -54,6 +54,9 @@ The terminal sidecar. One question, answered live:
 - **Acknowledge** work as you verify it — progress persists
 - Surfaces sessions **blocked on a question** first
 - Collapses the historical backlog so *today's* work stays visible
+- Quotes your **last message** to each session, and previews the **recent
+  edits** of the selected one — re-brief at a glance
+- And a lidless **Eye** keeps watch up top, in runes, while hobbits scurry past
 
 </td>
 <td width="50%" valign="top">
@@ -112,18 +115,29 @@ cp sauron/target/release/sauron /usr/local/bin/
 > **macOS + iTerm2 only.**
 
 ```bash
-workspace/workspace.sh          # 4 agent panes for the current repo
-workspace/workspace.sh 8        # 8 agent panes
-WORKSPACE_REPO=/path workspace/workspace.sh   # a specific repo
+workspace                       # the default project (see `alias default`)
+workspace 8                     # 8 agent panes
+workspace 8 <project>           # a specific project — count & project any order
+workspace 8 .                   # the current folder
+```
+
+`<project>` is a directory (path, `~`, `.`) **or** a short alias you've saved
+into workspace memory:
+
+```bash
+workspace alias default ~/code/my-repo   # what a bare `workspace` opens
+workspace alias api ~/code/api-service   # then:  workspace 6 api
+workspace alias                          # list saved aliases
+workspace unalias api                    # forget one
 ```
 
 It spins up a new iTerm2 window, throws it into native fullscreen (which gives
 it its own macOS Space), then splits it into a left column of `claude` panes and
 a right column with `sauron` on top.
 
-By default the launcher looks for the binary next to this repo
-(`sauron/target/release/sauron`). Override with `SAURON=/path`, or
-just put `sauron` on your `PATH`.
+By default the launcher prefers an installed `sauron` on your `PATH`
+(`cargo install --path sauron`), falling back to a fresh local build. Override
+with `SAURON=/path`.
 
 <details>
 <summary><b>Requirements</b></summary>

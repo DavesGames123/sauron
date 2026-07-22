@@ -468,14 +468,14 @@ fn main() -> std::io::Result<()> {
         return Ok(());
     }
 
-    // Headless list of the sessions sauron currently counts as Working, one
-    // per line as `session_id<TAB>display_name`. Consumed by the `workspace`
-    // tool to reopen each in-flight agent (`claude --resume <id>`) into a pane.
-    // Working = mid-turn and not stuck, i.e. the same "◐ working" set the TUI
-    // shows -- reusing App::rows means the definition can never drift from it.
+    // Headless list of the in-flight sessions, one per line as
+    // `session_id<TAB>display_name`. Consumed by the `workspace` tool to reopen
+    // each into a pane. In-flight means mid-turn (`Working`) or waiting on a
+    // background agent it spawned (`Delegated`) -- both are live tasks the user
+    // would want reopened; reusing App::rows keeps the definition from drifting.
     if list_working {
         for r in &app.rows {
-            if r.status == Status::Working {
+            if matches!(r.status, Status::Working | Status::Delegated) {
                 println!("{}\t{}", r.id, model::collapse_ws(&r.name));
             }
         }
@@ -627,6 +627,7 @@ fn print_once(app: &App) {
             Status::Blocked => "▲",
             Status::NeedsTest => "█",
             Status::Working => "◐",
+            Status::Delegated => "◇",
             Status::Clear => "·",
         };
         println!(

@@ -33,6 +33,7 @@ const RED: Color = Color::Rgb(255, 92, 110); // blocked on your answer
 const AMBER: Color = Color::Rgb(255, 176, 66); // awaiting acknowledgement
 const CYAN: Color = Color::Rgb(86, 205, 226); // agent still working
 const GREEN: Color = Color::Rgb(126, 200, 120); // nothing outstanding
+const INDIGO: Color = Color::Rgb(150, 140, 235); // delegated to a background agent
 const BLUE: Color = Color::Rgb(120, 170, 255); // chrome / repo identity
 pub(crate) const DIM: Color = Color::Rgb(88, 94, 104);
 const INK: Color = Color::Rgb(18, 20, 24); // text on a filled badge
@@ -54,6 +55,7 @@ pub fn color_of(status: Status) -> Color {
         Status::Blocked => RED,
         Status::NeedsTest => AMBER,
         Status::Working => CYAN,
+        Status::Delegated => INDIGO,
         Status::Clear => DIM,
     }
 }
@@ -64,6 +66,7 @@ fn glyph_of(status: Status) -> &'static str {
         Status::Blocked => "▲",
         Status::NeedsTest => "█",
         Status::Working => "◐",
+        Status::Delegated => "◇",
         Status::Clear => "·",
     }
 }
@@ -126,6 +129,7 @@ pub fn draw(f: &mut Frame, v: &View, list_state: &mut ListState, geo: &mut Frame
 fn header(f: &mut Frame, area: Rect, v: &View) {
     let awaiting = v.rows.iter().filter(|r| r.status == Status::NeedsTest).count();
     let working = v.rows.iter().filter(|r| r.status == Status::Working).count();
+    let delegated = v.rows.iter().filter(|r| r.status == Status::Delegated).count();
 
     let mut top = vec![
         Span::styled(
@@ -188,6 +192,13 @@ fn header(f: &mut Frame, area: Rect, v: &View) {
         top.push(Span::styled(
             format!("◐ {} working", working),
             Style::default().fg(CYAN),
+        ));
+        top.push(Span::raw("  "));
+    }
+    if delegated > 0 {
+        top.push(Span::styled(
+            format!("◇ {} delegated", delegated),
+            Style::default().fg(INDIGO),
         ));
         top.push(Span::raw("  "));
     }
@@ -382,6 +393,7 @@ fn section_header(status: Status, count: usize, width: usize) -> ListItem<'stati
         Status::Blocked => ("WAITING ON YOU", RED),
         Status::NeedsTest => ("AWAITING ACKNOWLEDGEMENT", AMBER),
         Status::Working => ("WORKING", CYAN),
+        Status::Delegated => ("RUNNING A BACKGROUND AGENT", INDIGO),
         Status::Clear => ("CLEAR", DIM),
     };
     let text = format!(" {} ({}) ", label, count);
@@ -419,6 +431,7 @@ fn card(row: &Row, selected: bool, now: i64, width: usize) -> ListItem<'static> 
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
         Status::Working => Style::default().fg(Color::Rgb(200, 210, 220)),
+        Status::Delegated => Style::default().fg(Color::Rgb(200, 210, 220)),
         Status::Clear => Style::default().fg(DIM),
     };
 
@@ -441,6 +454,7 @@ fn card(row: &Row, selected: bool, now: i64, width: usize) -> ListItem<'static> 
     let detail_color = match row.status {
         Status::Errored => MAGENTA,
         Status::NeedsTest => AMBER,
+        Status::Delegated => INDIGO,
         _ => DIM,
     };
     // A dead agent's file count is beside the point -- name the failure.
@@ -456,6 +470,8 @@ fn card(row: &Row, selected: bool, now: i64, width: usize) -> ListItem<'static> 
             .map(|r| r.short())
             .unwrap_or("waiting on you")
             .to_string()
+    } else if row.status == Status::Delegated {
+        "background agent running — resumes on its own".to_string()
     } else if row.pending.is_empty() {
         format!("{} file(s) · all acked", row.total_edits)
     } else {
@@ -660,6 +676,10 @@ fn detail(f: &mut Frame, area: Rect, row: Option<&Row>, now: i64) {
         Status::Working => lines.push(Line::styled(
             "agent is mid-turn — files still moving, do not test yet",
             Style::default().fg(CYAN),
+        )),
+        Status::Delegated => lines.push(Line::styled(
+            "spun up a background agent — waiting on it, not on you; resumes on its own",
+            Style::default().fg(INDIGO),
         )),
         Status::Clear => lines.push(Line::styled(
             "nothing outstanding",

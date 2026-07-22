@@ -139,6 +139,10 @@ pub enum Status {
     Blocked,
     /// Mid-turn -- the agent is computing.
     Working,
+    /// The turn ended, but the session spun up a background agent and is waiting
+    /// on *it*, not on you. It resumes on its own when the agent reports back, so
+    /// it must never be mistaken for the "stopped, your move" that wants a human.
+    Delegated,
     /// Idle, and has repo edits you have not acked at their current timestamp.
     NeedsTest,
     /// Idle with nothing outstanding.
@@ -151,6 +155,7 @@ impl Status {
             Status::Errored => "ERRORED",
             Status::Blocked => "WAITING ON YOU",
             Status::Working => "working",
+            Status::Delegated => "running a background agent",
             Status::NeedsTest => "NEEDS TEST",
             Status::Clear => "clear",
         }
@@ -158,14 +163,16 @@ impl Status {
 
     /// Sort rank: what should demand attention first. An errored agent outranks a
     /// blocked one because it will not recover on its own; a blocked agent
-    /// outranks untested work because it is stalled until you act.
+    /// outranks untested work because it is stalled until you act. Delegated work
+    /// wants nothing from you, so it sits below everything actionable.
     pub fn rank(self) -> u8 {
         match self {
             Status::Errored => 0,
             Status::Blocked => 1,
             Status::NeedsTest => 2,
             Status::Working => 3,
-            Status::Clear => 4,
+            Status::Delegated => 4,
+            Status::Clear => 5,
         }
     }
 }
@@ -195,6 +202,12 @@ pub struct Session {
     /// only a failure the session is *currently* parked on, never a stale one it
     /// already recovered from. `Some` forces `Status::Errored`.
     pub error: Option<ErrorKind>,
+    /// Epoch millis of the most recent "background agent launched" that has not
+    /// since been superseded by a fresh user turn. Non-zero means the session
+    /// spun up a background agent and, once its turn settles, is waiting on that
+    /// agent rather than on you -- the difference between `Delegated` and the
+    /// "stopped, your move" `AwaitingInput`.
+    pub agent_launched_ms: i64,
     /// Repo-relative path -> epoch millis of its most recent write by this session.
     pub edits: BTreeMap<String, i64>,
     /// Repo-relative path -> `(timestamp, lines)` of the most recent text an
@@ -312,8 +325,15 @@ impl Session {
         if self.error.is_some() {
             return Status::Errored;
         }
-        // Anything waiting on a human outranks everything else.
-        if self.blocked_reason(now, acked).is_some() {
+        if let Some(reason) = self.blocked_reason(now, acked) {
+            // A background agent it spawned is still out working: the turn ends
+            // the same way an idle-at-prompt turn does, but nothing is on you --
+            // it resumes itself when the agent reports back. Only that ambiguous
+            // AwaitingInput is reinterpreted; a real Question or a pending
+            // approval still means a human is genuinely needed.
+            if reason == BlockedReason::AwaitingInput && self.agent_launched_ms > 0 {
+                return Status::Delegated;
+            }
             return Status::Blocked;
         }
         // Mid-turn means the write set is still moving. Reporting it as testable
@@ -531,6 +551,40 @@ mod tests {
         let stale = now + RECENT_STOP_MS + 1;
         assert_eq!(s.blocked_reason(stale, None), None);
         assert_eq!(s.status(stale, None), Status::Clear);
+    }
+
+    #[test]
+    fn a_spawned_background_agent_is_delegated_not_your_move() {
+        let now = 1_000_000_000i64;
+        let mut s = Session::default();
+        s.turn_complete = true;
+        s.last_activity = now - 5_000;
+
+        // Without a launch, an idle finished turn is the ambiguous "your move".
+        assert_eq!(
+            s.blocked_reason(now, None),
+            Some(BlockedReason::AwaitingInput)
+        );
+        assert_eq!(s.status(now, None), Status::Blocked);
+
+        // Having spun up a background agent, the session is waiting on the agent,
+        // not on you -- it resumes itself, so it must not read as "your move".
+        s.agent_launched_ms = now - 5_000;
+        assert_eq!(s.status(now, None), Status::Delegated);
+
+        // A real question still wins: the human is genuinely needed.
+        s.open_questions.insert("toolu_1".into());
+        assert_eq!(s.status(now, None), Status::Blocked);
+        s.open_questions.clear();
+
+        // Untested edits still surface as NeedsTest -- delegation never hides work.
+        s.edits.insert("src/a.rs".into(), now - 5_000);
+        assert_eq!(s.status(now, None), Status::NeedsTest);
+        s.edits.clear();
+
+        // And once it goes quiet past the attention window it ages out to Clear,
+        // rather than claiming to be delegated forever.
+        assert_eq!(s.status(now + RECENT_STOP_MS + 1, None), Status::Clear);
     }
 
     #[test]

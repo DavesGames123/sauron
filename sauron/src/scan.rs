@@ -200,6 +200,19 @@ fn fold_record(session: &mut Session, v: &Value, repo_root: &Path) {
                 // A real user turn after a failure means the human already
                 // engaged it (a retry, a new prompt) -- the error is stale.
                 session.error = None;
+                // The tool result for a spawned background agent is a user
+                // record too: it starts the "waiting on the agent" clock. Any
+                // other real user turn -- a human prompt, or the agent reporting
+                // its result back -- supersedes that wait and clears it.
+                if mentions_async_launch(v) {
+                    session.agent_launched_ms = v
+                        .get("timestamp")
+                        .and_then(|t| t.as_str())
+                        .and_then(parse_rfc3339_ms)
+                        .unwrap_or(session.last_activity);
+                } else {
+                    session.agent_launched_ms = 0;
+                }
             }
         }
         // The stop hook fires when a turn ends and emits these. They are a more
@@ -253,6 +266,27 @@ fn fold_record(session: &mut Session, v: &Value, repo_root: &Path) {
     // Tool results ride on `user` records regardless of the write-set deltas, so
     // harvest the edited text here, outside the `kind` match.
     fold_edit_preview(session, v, repo_root);
+}
+
+/// True when this user record carries the "Async agent launched successfully"
+/// tool result -- the trace of the session spinning up a background agent, which
+/// returns immediately and lets the turn end while the agent keeps working.
+fn mentions_async_launch(v: &Value) -> bool {
+    const MARKER: &str = "Async agent launched successfully";
+    // The text lives a few levels down (message -> content -> tool_result ->
+    // content -> text), so walk every string in the message content.
+    fn any_string_contains(val: &Value, needle: &str) -> bool {
+        match val {
+            Value::String(s) => s.contains(needle),
+            Value::Array(a) => a.iter().any(|x| any_string_contains(x, needle)),
+            Value::Object(o) => o.values().any(|x| any_string_contains(x, needle)),
+            _ => false,
+        }
+    }
+    v.get("message")
+        .and_then(|m| m.get("content"))
+        .map(|c| any_string_contains(c, MARKER))
+        .unwrap_or(false)
 }
 
 /// Capture the actual text of an Edit/Write from its tool result, keyed by the
@@ -460,6 +494,40 @@ mod tests {
             s.last_activity,
             parse_rfc3339_ms("2026-07-21T18:00:00.000Z").unwrap()
         );
+    }
+
+    #[test]
+    fn background_agent_launch_sets_the_wait_and_a_later_turn_clears_it() {
+        let root = Path::new("/repo");
+        let mut s = Session::default();
+
+        // The launch tool result: the marker is nested a few levels down under
+        // message -> content -> tool_result -> content -> text.
+        fold_record(
+            &mut s,
+            &json!({
+                "type":"user","timestamp":"2026-07-22T05:00:00.000Z",
+                "message":{"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"t1","content":[
+                        {"type":"text","text":"Async agent launched successfully. agentId: abc123"}
+                    ]}
+                ]}
+            }),
+            root,
+        );
+        assert!(s.agent_launched_ms > 0, "launching an agent starts the wait");
+
+        // A later real user turn -- the agent reporting back, or a human prompt --
+        // supersedes and clears it.
+        fold_record(
+            &mut s,
+            &json!({
+                "type":"user","timestamp":"2026-07-22T05:01:00.000Z",
+                "message":{"role":"user","content":"thanks, carry on"}
+            }),
+            root,
+        );
+        assert_eq!(s.agent_launched_ms, 0, "a fresh user turn clears the wait");
     }
 
     #[test]

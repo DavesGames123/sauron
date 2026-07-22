@@ -33,11 +33,12 @@ const RING: Color = Color::Rgb(255, 214, 96); // the One Ring's glint
 const HOBBIT: Color = Color::Rgb(150, 190, 140); // Frodo & Sam
 const GOLLUM_C: Color = Color::Rgb(150, 172, 150); // the pale creeping thing
 const GROUND: Color = Color::Rgb(66, 70, 80); // the horizon the walkers cross
+const STONE: Color = Color::Rgb(92, 96, 112); // the black tower of Barad-dûr
 
-// Timeline: one walk per 20s, crossing over ~7.5s, idle the rest.
-const PERIOD: u64 = 20_000;
-const WALK_START: u64 = 12_000;
-const WALK_END: u64 = 19_500;
+// Timeline: one walk per 26s, crossing over ~7.5s, a long calm idle the rest.
+const PERIOD: u64 = 26_000;
+const WALK_START: u64 = 17_000;
+const WALK_END: u64 = 24_500;
 
 // Width of the Eye sprite in cells, and how far its left edge sits from the
 // right margin. Every glyph used is unambiguous-width-1 (block, box-drawing,
@@ -93,41 +94,56 @@ fn row_to_line(row: Vec<Cell>) -> Line<'static> {
     Line::from(spans)
 }
 
-/// The four Eye rows for a pose and pupil column (0..=6, left..right).
-fn eye_rows(pose: Pose, pupil: usize, flicker: usize) -> [Vec<Cell>; 4] {
+/// The Eye set atop Barad-dûr: five rows, `EYE_W` wide. The fiery Eye (with its
+/// flame crown and moving pupil) is framed by the stone tower -- walls down the
+/// sides, a flared base on the ground. Pupil column is 0..=4, left..right.
+fn eye_tower(pose: Pose, pupil: usize, flicker: usize) -> [Vec<Cell>; 5] {
     let bright = pose == Pose::Wide;
     let flame = Style::default().fg(if bright { FLARE } else { FLAME });
     let dark = Style::default().fg(EMBER);
     let lid = Style::default().fg(RUNE);
+    let stone = Style::default().fg(STONE);
 
-    // Subtle flame flicker on the crown row.
-    let caps = ["   ▄▟█▙▄   ", "   ▟▄█▄▙   ", "   ▄█▀█▄   "];
+    // A gentle two-frame flame crown -- a slow shimmer, not a busy flicker.
+    let crowns = ["   ▄▟█▙▄   ", "   ▗▟█▙▖   "];
     let mut r0 = blank_row(EYE_W);
-    stamp(&mut r0, 0, caps[flicker % caps.len()], flame);
-    let mut r1 = blank_row(EYE_W);
-    stamp(&mut r1, 0, "  ▟█████▙  ", flame);
-    let mut r3 = blank_row(EYE_W);
-    stamp(&mut r3, 0, "  ▜█████▛  ", flame);
+    stamp(&mut r0, 0, crowns[flicker % crowns.len()], flame);
 
-    // Middle row carries the pupil. Iris is seven cells (sprite cols 2..=8).
+    // Upper and lower of the Eye, each flanked by a stone wall.
+    let mut r1 = blank_row(EYE_W);
+    stamp(&mut r1, 1, "█", stone);
+    stamp(&mut r1, 2, "▟█████▙", flame);
+    stamp(&mut r1, 9, "█", stone);
+    let mut r3 = blank_row(EYE_W);
+    stamp(&mut r3, 1, "█", stone);
+    stamp(&mut r3, 2, "▜█████▛", flame);
+    stamp(&mut r3, 9, "█", stone);
+
+    // The Eye's middle carries the pupil. Iris is five cells (sprite cols 3..=7).
     let mut r2 = blank_row(EYE_W);
-    stamp(&mut r2, 1, "▐", flame);
-    stamp(&mut r2, 9, "▌", flame);
+    stamp(&mut r2, 1, "█", stone);
+    stamp(&mut r2, 2, "▐", flame);
+    stamp(&mut r2, 8, "▌", flame);
+    stamp(&mut r2, 9, "█", stone);
     match pose {
-        Pose::Blink => stamp(&mut r2, 2, "━━━━━━━", lid),
+        Pose::Blink => stamp(&mut r2, 3, "━━━━━", lid),
         _ => {
-            // Wide dilates the middle three cells; otherwise the single pupil.
-            for i in 0..7usize {
+            for i in 0..5usize {
                 let is_pupil = if pose == Pose::Wide {
-                    (2..=4).contains(&i)
+                    (1..=3).contains(&i)
                 } else {
-                    i == pupil.min(6)
+                    i == pupil.min(4)
                 };
-                stamp(&mut r2, 2 + i as i32, "█", if is_pupil { dark } else { flame });
+                stamp(&mut r2, 3 + i as i32, "█", if is_pupil { dark } else { flame });
             }
         }
     }
-    [r0, r1, r2, r3]
+
+    // The tower foot, flaring out where it meets the ground.
+    let mut r4 = blank_row(EYE_W);
+    stamp(&mut r4, 0, "▟█████████▙", stone);
+
+    [r0, r1, r2, r3, r4]
 }
 
 /// Frodo, Sam, Gollum as two-cell sprites, mid-stride, facing right or left.
@@ -140,14 +156,16 @@ fn walker_sprites(leg: usize, right: bool) -> (&'static str, &'static str, &'sta
     }
 }
 
-/// The idle Eye: mostly a level stare, an occasional glance aside, a blink.
-/// Returns `(pose, pupil column)`.
+/// The idle Eye: a long, level, watchful stare with only rare, slow motion -- a
+/// couple of blinks and one held glance across the whole idle stretch, so it
+/// broods rather than darts about. `t` is the phase within `PERIOD`; the walk
+/// owns 17s..24.5s, so the events here sit in the calm before it.
 fn idle_pose(t: u64) -> (Pose, usize) {
-    match (t / 650) % 9 {
-        4 | 8 => (Pose::Blink, 3),
-        2 => (Pose::Center, 1), // glance left
-        6 => (Pose::Center, 5), // glance right
-        _ => (Pose::Center, 3), // level
+    match t {
+        5_000..=5_250 => (Pose::Blink, 2),
+        10_500..=11_599 => (Pose::Center, 0), // a slow glance left, held
+        11_600..=11_850 => (Pose::Blink, 2),  // and a blink as it returns
+        _ => (Pose::Center, 2),               // the level stare (centre of 5)
     }
 }
 
@@ -171,7 +189,8 @@ const VERSES: [(&str, &str); 3] = [
 ];
 
 fn verse(ms: u64) -> (&'static str, &'static str) {
-    VERSES[((ms / 5_000) % VERSES.len() as u64) as usize]
+    // A slow engraving: each line lingers for half a minute.
+    VERSES[((ms / 30_000) % VERSES.len() as u64) as usize]
 }
 
 /// Latin -> Elder Futhark. `th` becomes the thorn rune; unknown chars pass
@@ -222,10 +241,13 @@ pub fn scene(width: usize, ms: u64) -> Vec<Line<'static>> {
     let t = ms % PERIOD;
     let cyc = ms / PERIOD;
     let leg = ((ms / 180) % 2) as usize;
-    let flicker = ((ms / 160) % 3) as usize;
+    let flicker = ((ms / 850) % 2) as usize; // a lazy flame, not a busy one
     let eye_left = w.saturating_sub(EYE_MARGIN) as i32;
     let eye_col = eye_left + 5; // the pupil's screen column
 
+    // Resolve the Eye's pose, and remember the procession (if any) so it can be
+    // drawn in front of the tower foot rather than behind it.
+    let mut walk: Option<(i32, bool)> = None;
     let (pose, pupil) = if let Some((prog, right)) = walk_at(t, cyc) {
         let span = (w + 16) as f64;
         let base = if right {
@@ -233,6 +255,36 @@ pub fn scene(width: usize, ms: u64) -> Vec<Line<'static>> {
         } else {
             (w as f64 + 4.0 - prog * span).floor() as i32
         };
+        walk = Some((base, right));
+        // The Eye follows the lead hobbit and flares wide as they pass beneath.
+        let frac = (base as f64 / w as f64).clamp(0.0, 1.0);
+        let pupil = (frac * 4.0).round() as usize;
+        let pose = if (eye_col - base).abs() < 4 {
+            Pose::Wide
+        } else {
+            Pose::Center
+        };
+        (pose, pupil.min(4))
+    } else {
+        idle_pose(t)
+    };
+
+    // The tower and its Eye occupy all five rows; the foot lands on the ground.
+    for (r, row) in eye_tower(pose, pupil, flicker).into_iter().enumerate() {
+        for (i, (ch, st)) in row.into_iter().enumerate() {
+            if ch == ' ' {
+                continue;
+            }
+            let c = eye_left + i as i32;
+            if c >= 0 && (c as usize) < w {
+                grid[r][c as usize] = (ch, st);
+            }
+        }
+    }
+
+    // The procession, in the foreground, so the hobbits pass in front of the
+    // tower's foot instead of vanishing behind it.
+    if let Some((base, right)) = walk {
         let (fr, sm, go) = walker_sprites(leg, right);
         let hob = Style::default().fg(HOBBIT);
         let gol = Style::default().fg(GOLLUM_C);
@@ -249,31 +301,6 @@ pub fn scene(width: usize, ms: u64) -> Vec<Line<'static>> {
             stamp(&mut grid[4], base + 3, sm, hob);
             stamp(&mut grid[4], base + 9, go, gol);
             stamp(&mut grid[4], base - 2, "*", ring);
-        }
-        // The Eye follows the lead hobbit and flares wide as they pass beneath.
-        let lead = base;
-        let frac = (lead as f64 / w as f64).clamp(0.0, 1.0);
-        let pupil = (frac * 6.0).round() as usize;
-        let pose = if (eye_col - lead).abs() < 4 {
-            Pose::Wide
-        } else {
-            Pose::Center
-        };
-        (pose, pupil.min(6))
-    } else {
-        idle_pose(t)
-    };
-
-    // The Eye, top-right, rows 0..=3.
-    for (r, row) in eye_rows(pose, pupil, flicker).into_iter().enumerate() {
-        for (i, (ch, st)) in row.into_iter().enumerate() {
-            if ch == ' ' {
-                continue;
-            }
-            let c = eye_left + i as i32;
-            if c >= 0 && (c as usize) < w {
-                grid[r][c as usize] = (ch, st);
-            }
         }
     }
 
@@ -301,7 +328,7 @@ mod tests {
     #[test]
     fn scene_is_five_lines_and_never_overflows_width() {
         for &w in &[24usize, 40, 80, 120] {
-            for ms in [0u64, 3_000, 13_000, 14_000, 16_000, 33_000, 999_999] {
+            for ms in [0u64, 6_000, 20_000, 21_000, 23_000, 46_000, 999_999] {
                 let s = scene(w, ms);
                 assert_eq!(s.len(), 5, "w={w} ms={ms}");
                 for l in &s {
@@ -314,10 +341,10 @@ mod tests {
     #[test]
     fn walkers_appear_only_during_a_walk_window() {
         // Mid-idle: no hobbit on the ground.
-        let idle = line_text(&scene(80, 3_000)[4]);
+        let idle = line_text(&scene(80, 6_000)[4]);
         assert!(!idle.contains('ó'), "hobbit showed up while idle: {idle}");
-        // Mid-walk: Frodo, Sam, and the Ring are crossing.
-        let walk = line_text(&scene(80, 15_000)[4]);
+        // Mid-walk (the window is 17s..24.5s): Frodo, Sam, and the Ring cross.
+        let walk = line_text(&scene(80, 20_000)[4]);
         assert!(walk.contains('ó'), "Frodo missing mid-walk: {walk}");
         assert!(walk.contains('ô'), "Sam missing mid-walk: {walk}");
         assert!(walk.contains('*'), "the Ring's glint is missing: {walk}");
@@ -325,19 +352,22 @@ mod tests {
 
     #[test]
     fn eye_blinks_on_the_idle_schedule() {
-        // idle_pose puts a blink in slots 4 and 8; slot 4 starts at t=2600.
-        assert_eq!(idle_pose(2_600).0, Pose::Blink);
+        // The idle blink sits at t≈5000.
+        assert_eq!(idle_pose(5_100).0, Pose::Blink);
         // A blink renders the lid rune on the Eye's middle row (row index 2).
-        let mid = line_text(&scene(80, 2_600)[2]);
+        let mid = line_text(&scene(80, 5_100)[2]);
         assert!(mid.contains('━'), "no closed lid on a blink frame: {mid}");
+        // ...and the level stare between events is NOT a blink.
+        assert_eq!(idle_pose(2_000).0, Pose::Center);
     }
 
     #[test]
     fn direction_alternates_between_walks() {
         // First walk heads right, the next heads left.
-        assert_eq!(walk_at(15_000, 0), Some(((15_000 - WALK_START) as f64 / 7_500.0, true)));
-        assert_eq!(walk_at(15_000, 1).map(|(_, r)| r), Some(false));
-        assert_eq!(walk_at(3_000, 0), None);
+        let prog = (20_000 - WALK_START) as f64 / (WALK_END - WALK_START) as f64;
+        assert_eq!(walk_at(20_000, 0), Some((prog, true)));
+        assert_eq!(walk_at(20_000, 1).map(|(_, r)| r), Some(false));
+        assert_eq!(walk_at(6_000, 0), None);
     }
 
     #[test]

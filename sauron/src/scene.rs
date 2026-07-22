@@ -34,6 +34,8 @@ const HOBBIT: Color = Color::Rgb(150, 190, 140); // Frodo & Sam
 const GOLLUM_C: Color = Color::Rgb(150, 172, 150); // the pale creeping thing
 const GROUND: Color = Color::Rgb(66, 70, 80); // the horizon the walkers cross
 const STONE: Color = Color::Rgb(92, 96, 112); // the black tower of Barad-dûr
+const HOT: Color = Color::Rgb(255, 236, 150); // white-hot: flame tips and the Eye's core
+const RED: Color = Color::Rgb(200, 54, 20); // deep red: the cool outer edge of the fire
 
 // Timeline: one walk per 26s, crossing over ~7.5s, a long calm idle the rest.
 const PERIOD: u64 = 26_000;
@@ -94,54 +96,91 @@ fn row_to_line(row: Vec<Cell>) -> Line<'static> {
     Line::from(spans)
 }
 
-/// The Eye set atop Barad-dûr: five rows, `EYE_W` wide. The fiery Eye (with its
-/// flame crown and moving pupil) is framed by the stone tower -- walls down the
-/// sides, a flared base on the ground. Pupil column is 0..=4, left..right.
+/// The Eye set atop Barad-dûr: five rows, `EYE_W` wide. The Eye burns -- an
+/// animated flame crown with white-hot tips and sparks, and a hot -> orange ->
+/// deep-red gradient across the fire so it glows like an ember rather than a
+/// flat block -- all framed by the stone tower. Pupil column is 0..=6.
 fn eye_tower(pose: Pose, pupil: usize, flicker: usize) -> [Vec<Cell>; 5] {
-    let bright = pose == Pose::Wide;
-    let flame = Style::default().fg(if bright { FLARE } else { FLAME });
+    let bright = pose == Pose::Wide; // when it flares, every band shifts hotter
+    let stone = Style::default().fg(STONE);
     let dark = Style::default().fg(EMBER);
     let lid = Style::default().fg(RUNE);
-    let stone = Style::default().fg(STONE);
+    let hot = Style::default().fg(HOT);
+    let flare = Style::default().fg(if bright { HOT } else { FLARE });
+    let flame = Style::default().fg(if bright { FLARE } else { FLAME });
+    let red = Style::default().fg(if bright { FLAME } else { RED });
 
-    // A gentle two-frame flame crown -- a slow shimmer, not a busy flicker.
-    let crowns = ["  ▄▟█████▙▄  ", "  ▗▟█████▙▖  "];
+    // The flame crown: three frames of licking fire with sparks flying off the
+    // edges. Tips and sparks are white-hot; the body glows.
+    let crowns = ["  ▖▄▟███▙▄▗  ", "  ▗▟█▟█▙█▙▖  ", "  ▘▄▟█▙▟█▄▝  "];
     let mut r0 = blank_row(EYE_W);
-    stamp(&mut r0, 0, crowns[flicker % crowns.len()], flame);
+    for (i, ch) in crowns[flicker % crowns.len()].chars().enumerate() {
+        if ch == ' ' {
+            continue;
+        }
+        // Sparks (quadrant dots) and flame tips (▄▀) are hottest.
+        let st = match ch {
+            '▖' | '▗' | '▘' | '▝' | '▄' | '▀' => hot,
+            _ => flare,
+        };
+        r0[i] = (ch, st);
+    }
 
-    // Upper and lower of the Eye, each flanked by a stone wall.
+    // Eye upper/lower: red-hot outer corners fading to orange across the middle.
     let mut r1 = blank_row(EYE_W);
-    stamp(&mut r1, 1, "█", stone);
-    stamp(&mut r1, 2, "▟███████▙", flame);
-    stamp(&mut r1, 11, "█", stone);
+    r1[1] = ('█', stone);
+    r1[2] = ('▟', red);
+    for c in 3..10 {
+        r1[c] = ('█', flame);
+    }
+    r1[10] = ('▙', red);
+    r1[11] = ('█', stone);
     let mut r3 = blank_row(EYE_W);
-    stamp(&mut r3, 1, "█", stone);
-    stamp(&mut r3, 2, "▜███████▛", flame);
-    stamp(&mut r3, 11, "█", stone);
+    r3[1] = ('█', stone);
+    r3[2] = ('▜', red);
+    for c in 3..10 {
+        r3[c] = ('█', flame);
+    }
+    r3[10] = ('▛', red);
+    r3[11] = ('█', stone);
 
-    // The Eye's middle carries the pupil. Iris is seven cells (sprite cols 3..=9).
+    // The Eye's middle -- the hottest band. Iris (cols 3..=9) runs a gradient
+    // from a white-hot core out to red edges; the pupil is a dark hole in it.
     let mut r2 = blank_row(EYE_W);
-    stamp(&mut r2, 1, "█", stone);
-    stamp(&mut r2, 2, "▐", flame);
-    stamp(&mut r2, 10, "▌", flame);
-    stamp(&mut r2, 11, "█", stone);
+    r2[1] = ('█', stone);
+    r2[11] = ('█', stone);
+    r2[2] = ('▐', red);
+    r2[10] = ('▌', red);
     match pose {
-        Pose::Blink => stamp(&mut r2, 3, "━━━━━━━", lid),
+        Pose::Blink => {
+            for c in 3..10 {
+                r2[c] = ('━', lid);
+            }
+        }
         _ => {
             for i in 0..7usize {
+                let col = 3 + i;
+                let heat = match (col as i32 - 6).abs() {
+                    0 => hot,
+                    1 => flare,
+                    2 => flame,
+                    _ => red,
+                };
                 let is_pupil = if pose == Pose::Wide {
                     (2..=4).contains(&i)
                 } else {
                     i == pupil.min(6)
                 };
-                stamp(&mut r2, 3 + i as i32, "█", if is_pupil { dark } else { flame });
+                r2[col] = ('█', if is_pupil { dark } else { heat });
             }
         }
     }
 
     // The tower foot, flaring out where it meets the ground.
     let mut r4 = blank_row(EYE_W);
-    stamp(&mut r4, 0, "▟███████████▙", stone);
+    for (i, ch) in "▟███████████▙".chars().enumerate() {
+        r4[i] = (ch, stone);
+    }
 
     [r0, r1, r2, r3, r4]
 }
@@ -241,7 +280,7 @@ pub fn scene(width: usize, ms: u64) -> Vec<Line<'static>> {
     let t = ms % PERIOD;
     let cyc = ms / PERIOD;
     let leg = ((ms / 180) % 2) as usize;
-    let flicker = ((ms / 850) % 2) as usize; // a lazy flame, not a busy one
+    let flicker = ((ms / 220) % 3) as usize; // the fire licks; the pupil stays calm
     let eye_left = w.saturating_sub(EYE_MARGIN) as i32;
     let eye_col = eye_left + 6; // the pupil's screen column
 

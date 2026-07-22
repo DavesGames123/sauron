@@ -16,12 +16,20 @@
 # API. Fullscreen-first also means large N never trips iTerm2's min pane size.
 #
 # Usage:
-#   workspace                 open a pane for every working task (min 1)
-#   workspace init            same
-#   workspace 8               force 8 left panes: working tasks first, rest bare
-#   workspace init 8          same
+#   workspace                     open the default project (see `alias default`)
+#   workspace 8                   force 8 left panes (working tasks first, rest bare)
+#   workspace <project>           open a project by path or by saved alias
+#   workspace 8 <project>         both — the count and project may be in either order
+#   workspace 8 .                 open the current folder
 #
-# When there are no working tasks and no count is given, opens 4 bare panes.
+#   workspace alias <name> <path> save a project alias into workspace memory
+#   workspace alias               list saved aliases
+#   workspace unalias <name>      forget one
+#
+# <project> is a directory (~ and . are fine) or an alias saved above. A bare
+# `workspace` opens the `default` alias, else $WORKSPACE_REPO, else the git repo
+# containing the cwd. When there are no working tasks and no count is given, it
+# opens 4 bare panes.
 #
 # Requirements:
 #   - iTerm2 with the AppleScript API enabled
@@ -30,24 +38,91 @@
 
 set -euo pipefail
 
-# The project to open the agent layout for. Defaults to the git repo containing
-# the cwd, falling back to the cwd itself. Override with WORKSPACE_REPO.
-REPO="${WORKSPACE_REPO:-$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || pwd)}"
+# ---------------------------------------------------------------------------
+# Workspace memory: a tiny  name<TAB>path  registry so projects can be launched
+# by a short alias instead of a full path, and the default lives somewhere the
+# next machine can be told about. The special alias `default` is what a bare
+# `workspace` opens. Override the file location with WORKSPACE_STORE.
+# ---------------------------------------------------------------------------
+WS_STORE="${WORKSPACE_STORE:-$HOME/.claude/sauron/workspaces}"
 
-# Path to the sauron binary. Prefer the copy built alongside this script (the
-# freshest build), then fall back to whatever `sauron` is on PATH -- e.g. from
-# `cargo install --path sauron`, which drops it in ~/.cargo/bin -- so the
-# launcher keeps working from a moved, clean, or relocated checkout instead of
-# depending on a build living at one exact relative path. Override with SAURON.
+# name -> path, empty if unknown. awk, not `grep -P`: BSD grep has no -P.
+ws_alias_path() {
+  [[ -f "$WS_STORE" ]] && awk -F'\t' -v n="$1" '$1==n{print $2; exit}' "$WS_STORE"
+}
+
+ws_alias_set() {
+  local name="$1" path="$2"
+  [[ -n "$name" && -n "$path" ]] || { echo "usage: workspace alias <name> <path>" >&2; exit 2; }
+  path="${path/#\~/$HOME}"
+  path="$(cd "$path" 2>/dev/null && pwd || echo "$path")" # absolute-ise if it exists
+  [[ -d "$path" ]] || { echo "workspace: not a directory: $path" >&2; exit 1; }
+  mkdir -p "$(dirname "$WS_STORE")"
+  local tmp="$WS_STORE.tmp.$$"
+  # Drop any existing row for this name, then append the new one -> upsert.
+  { [[ -f "$WS_STORE" ]] && awk -F'\t' -v n="$name" '$1!=n' "$WS_STORE"
+    printf '%s\t%s\n' "$name" "$path"; } > "$tmp"
+  mv "$tmp" "$WS_STORE"
+  echo "workspace: alias '$name' -> $path"
+}
+
+ws_alias_del() {
+  local name="$1"
+  [[ -n "$name" ]] || { echo "usage: workspace unalias <name>" >&2; exit 2; }
+  [[ -f "$WS_STORE" ]] || { echo "workspace: no aliases saved"; return 0; }
+  local tmp="$WS_STORE.tmp.$$"
+  awk -F'\t' -v n="$name" '$1!=n' "$WS_STORE" > "$tmp"
+  mv "$tmp" "$WS_STORE"
+  echo "workspace: removed alias '$name'"
+}
+
+ws_alias_list() {
+  if [[ -s "$WS_STORE" ]]; then
+    awk -F'\t' '{printf "  %-16s %s\n", $1, $2}' "$WS_STORE"
+  else
+    echo "  (no workspaces saved yet — add one with: workspace alias <name> <path>)"
+  fi
+}
+
+# Registry subcommands run and exit before any launch work.
+case "${1:-}" in
+  alias|aliases)
+    shift
+    if [[ $# -eq 0 ]]; then ws_alias_list; else ws_alias_set "${1:-}" "${2:-}"; fi
+    exit 0 ;;
+  unalias|forget)
+    shift; ws_alias_del "${1:-}"; exit 0 ;;
+  ls|list)
+    ws_alias_list; exit 0 ;;
+esac
+
+# Launch args are order-independent:  workspace [init] [N] [project]
+# A purely-numeric arg is the pane count; anything else is the project.
+[[ "${1:-}" == "init" ]] && shift || true
+N_ARG=""; PROJECT=""
+for a in "$@"; do
+  if [[ "$a" =~ ^[0-9]+$ ]]; then
+    N_ARG="$a"
+  else
+    PROJECT="$a"
+  fi
+done
+
+if [[ -n "$N_ARG" ]] && (( N_ARG < 1 )); then
+  echo "workspace: agent count must be a positive integer (got '$N_ARG')" >&2
+  exit 1
+fi
+
+# Path to the sauron binary. Prefer an installed copy on PATH (`cargo install
+# --path sauron` -> ~/.cargo/bin): its stable absolute path keeps the command
+# this launcher bakes into each iTerm pane resolving after the repo is moved or
+# a window is restored, which a path into the build tree does not. Fall back to
+# a fresh local build, then to the not-built hint. Override with SAURON.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_SAURON="$SCRIPT_DIR/../sauron/target/release/sauron"
 if [[ -n "${SAURON:-}" ]]; then
   : # explicit override wins, untouched
 elif command -v sauron >/dev/null 2>&1; then
-  # An installed copy (`cargo install --path sauron` -> ~/.cargo/bin) has a
-  # stable absolute path, so the command this launcher bakes into each iTerm
-  # pane keeps resolving after the repo is moved or a window is restored --
-  # which a path into the build tree does not. This is the durable default.
   SAURON="$(command -v sauron)"
 elif [[ -x "$LOCAL_SAURON" ]]; then
   SAURON="$LOCAL_SAURON" # no install yet: fall back to a fresh local build
@@ -55,18 +130,41 @@ else
   SAURON="$LOCAL_SAURON" # nothing built -> the "not built" hint points here
 fi
 
-# Accept:  workspace | workspace init | workspace 8 | workspace init 8
-[[ "${1:-}" == "init" ]] && shift || true
-N_ARG="${1:-}"
+# Resolve which project to watch. Explicit arg wins (a directory path, or a
+# saved alias); otherwise the `default` alias, then $WORKSPACE_REPO, then the
+# git repo containing the cwd, then the cwd itself.
+ws_resolve() { # $1 -> absolute dir on stdout, or non-zero
+  local p="$1" hit
+  p="${p/#\~/$HOME}"
+  # Path-like (a slash, or . / ..): resolve strictly as a directory.
+  if [[ "$p" == */* || "$p" == "." || "$p" == ".." ]]; then
+    if [[ -d "$p" ]]; then (cd "$p" && pwd); return 0; fi
+    return 1
+  fi
+  # A bare word means the alias first -- so `workspace sauron` opens the saved
+  # sauron project, not a coincidental ./sauron subdir -- then a same-named dir.
+  hit="$(ws_alias_path "$1")"
+  if [[ -n "$hit" && -d "$hit" ]]; then echo "$hit"; return 0; fi
+  if [[ -d "$p" ]]; then (cd "$p" && pwd); return 0; fi
+  return 1
+}
 
-if [[ -n "$N_ARG" ]] && { ! [[ "$N_ARG" =~ ^[0-9]+$ ]] || (( N_ARG < 1 )); }; then
-  echo "workspace: agent count must be a positive integer (got '$N_ARG')" >&2
-  exit 1
+if [[ -n "$PROJECT" ]]; then
+  if ! REPO="$(ws_resolve "$PROJECT")"; then
+    echo "workspace: '$PROJECT' is not a directory or a saved alias." >&2
+    echo "  saved aliases:" >&2
+    ws_alias_list >&2
+    exit 1
+  fi
+else
+  REPO="${WORKSPACE_REPO:-$(ws_alias_path default)}"
+  [[ -n "$REPO" ]] || REPO="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || pwd)"
 fi
 
 if [[ ! -d "$REPO" ]]; then
   echo "workspace: repo not found: $REPO" >&2
-  echo "  set WORKSPACE_REPO=/path/to/repo to override" >&2
+  echo "  pass a path or alias:  workspace [N] <project>" >&2
+  echo "  or save a default:     workspace alias default /path/to/repo" >&2
   exit 1
 fi
 
@@ -93,6 +191,15 @@ if [[ -x "$SAURON" ]]; then
   SAURON_CMD="$SAURON"
 else
   SAURON_CMD="echo 'sauron not built — run: cargo build --release --manifest-path $SCRIPT_DIR/../sauron/Cargo.toml'"
+fi
+
+# Dry run: report the resolved plan and stop, before touching iTerm. Used by the
+# tests and handy for "what would `workspace X` actually open?".
+if [[ -n "${WORKSPACE_DRYRUN:-}" ]]; then
+  echo "REPO=$REPO"
+  echo "TOTAL=$TOTAL"
+  echo "SAURON=$SAURON"
+  exit 0
 fi
 
 # Build the AppleScript list of per-pane commands: working tasks (resumed) first,

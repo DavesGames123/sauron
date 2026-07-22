@@ -43,8 +43,8 @@ const WALK_END: u64 = 24_500;
 // Width of the Eye sprite in cells, and how far its left edge sits from the
 // right margin. Every glyph used is unambiguous-width-1 (block, box-drawing,
 // runic, latin, ascii), so a char index equals a screen column.
-const EYE_W: usize = 11;
-const EYE_MARGIN: usize = 13;
+const EYE_W: usize = 13;
+const EYE_MARGIN: usize = 15;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Pose {
@@ -105,34 +105,34 @@ fn eye_tower(pose: Pose, pupil: usize, flicker: usize) -> [Vec<Cell>; 5] {
     let stone = Style::default().fg(STONE);
 
     // A gentle two-frame flame crown -- a slow shimmer, not a busy flicker.
-    let crowns = ["   ▄▟█▙▄   ", "   ▗▟█▙▖   "];
+    let crowns = ["  ▄▟█████▙▄  ", "  ▗▟█████▙▖  "];
     let mut r0 = blank_row(EYE_W);
     stamp(&mut r0, 0, crowns[flicker % crowns.len()], flame);
 
     // Upper and lower of the Eye, each flanked by a stone wall.
     let mut r1 = blank_row(EYE_W);
     stamp(&mut r1, 1, "█", stone);
-    stamp(&mut r1, 2, "▟█████▙", flame);
-    stamp(&mut r1, 9, "█", stone);
+    stamp(&mut r1, 2, "▟███████▙", flame);
+    stamp(&mut r1, 11, "█", stone);
     let mut r3 = blank_row(EYE_W);
     stamp(&mut r3, 1, "█", stone);
-    stamp(&mut r3, 2, "▜█████▛", flame);
-    stamp(&mut r3, 9, "█", stone);
+    stamp(&mut r3, 2, "▜███████▛", flame);
+    stamp(&mut r3, 11, "█", stone);
 
-    // The Eye's middle carries the pupil. Iris is five cells (sprite cols 3..=7).
+    // The Eye's middle carries the pupil. Iris is seven cells (sprite cols 3..=9).
     let mut r2 = blank_row(EYE_W);
     stamp(&mut r2, 1, "█", stone);
     stamp(&mut r2, 2, "▐", flame);
-    stamp(&mut r2, 8, "▌", flame);
-    stamp(&mut r2, 9, "█", stone);
+    stamp(&mut r2, 10, "▌", flame);
+    stamp(&mut r2, 11, "█", stone);
     match pose {
-        Pose::Blink => stamp(&mut r2, 3, "━━━━━", lid),
+        Pose::Blink => stamp(&mut r2, 3, "━━━━━━━", lid),
         _ => {
-            for i in 0..5usize {
+            for i in 0..7usize {
                 let is_pupil = if pose == Pose::Wide {
-                    (1..=3).contains(&i)
+                    (2..=4).contains(&i)
                 } else {
-                    i == pupil.min(4)
+                    i == pupil.min(6)
                 };
                 stamp(&mut r2, 3 + i as i32, "█", if is_pupil { dark } else { flame });
             }
@@ -141,7 +141,7 @@ fn eye_tower(pose: Pose, pupil: usize, flicker: usize) -> [Vec<Cell>; 5] {
 
     // The tower foot, flaring out where it meets the ground.
     let mut r4 = blank_row(EYE_W);
-    stamp(&mut r4, 0, "▟█████████▙", stone);
+    stamp(&mut r4, 0, "▟███████████▙", stone);
 
     [r0, r1, r2, r3, r4]
 }
@@ -162,10 +162,10 @@ fn walker_sprites(leg: usize, right: bool) -> (&'static str, &'static str, &'sta
 /// owns 17s..24.5s, so the events here sit in the calm before it.
 fn idle_pose(t: u64) -> (Pose, usize) {
     match t {
-        5_000..=5_250 => (Pose::Blink, 2),
+        5_000..=5_250 => (Pose::Blink, 3),
         10_500..=11_599 => (Pose::Center, 0), // a slow glance left, held
-        11_600..=11_850 => (Pose::Blink, 2),  // and a blink as it returns
-        _ => (Pose::Center, 2),               // the level stare (centre of 5)
+        11_600..=11_850 => (Pose::Blink, 3),  // and a blink as it returns
+        _ => (Pose::Center, 3),               // the level stare (centre of 7)
     }
 }
 
@@ -243,7 +243,7 @@ pub fn scene(width: usize, ms: u64) -> Vec<Line<'static>> {
     let leg = ((ms / 180) % 2) as usize;
     let flicker = ((ms / 850) % 2) as usize; // a lazy flame, not a busy one
     let eye_left = w.saturating_sub(EYE_MARGIN) as i32;
-    let eye_col = eye_left + 5; // the pupil's screen column
+    let eye_col = eye_left + 6; // the pupil's screen column
 
     // Resolve the Eye's pose, and remember the procession (if any) so it can be
     // drawn in front of the tower foot rather than behind it.
@@ -258,13 +258,13 @@ pub fn scene(width: usize, ms: u64) -> Vec<Line<'static>> {
         walk = Some((base, right));
         // The Eye follows the lead hobbit and flares wide as they pass beneath.
         let frac = (base as f64 / w as f64).clamp(0.0, 1.0);
-        let pupil = (frac * 4.0).round() as usize;
+        let pupil = (frac * 6.0).round() as usize;
         let pose = if (eye_col - base).abs() < 4 {
             Pose::Wide
         } else {
             Pose::Center
         };
-        (pose, pupil.min(4))
+        (pose, pupil.min(6))
     } else {
         idle_pose(t)
     };

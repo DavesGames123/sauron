@@ -61,8 +61,8 @@ The terminal sidecar. One question, answered live:
 </td>
 <td width="50%" valign="top">
 
-### 🪟 `workspace`
-The macOS/iTerm2 launcher. One command, a whole cockpit:
+### 🪟 `sauron workspace`
+A subcommand of the same binary. One command, a whole cockpit:
 
 - Opens a **fullscreen layout on its own Space**
 - A column of **bare `claude` panes** (pick how many)
@@ -110,34 +110,33 @@ cp sauron/target/release/sauron /usr/local/bin/
 
 ---
 
-## 🪟 workspace — the multi-agent cockpit
+## 🪟 `sauron workspace` — the multi-agent cockpit
 
 > **macOS + iTerm2 only.**
 
 ```bash
-workspace                       # the default project (see `alias default`)
-workspace 8                     # 8 agent panes
-workspace 8 <project>           # a specific project — count & project any order
-workspace 8 .                   # the current folder
+sauron workspace                  # the default project (see `alias default`)
+sauron workspace 8                # 8 agent panes
+sauron workspace 8 <project>      # a specific project — count & project any order
+sauron workspace 8 .              # the current folder
 ```
 
 `<project>` is a directory (path, `~`, `.`) **or** a short alias you've saved
 into workspace memory:
 
 ```bash
-workspace alias default ~/code/my-repo   # what a bare `workspace` opens
-workspace alias api ~/code/api-service   # then:  workspace 6 api
-workspace alias                          # list saved aliases
-workspace unalias api                    # forget one
+sauron workspace alias default ~/code/my-repo   # what a bare `sauron workspace` opens
+sauron workspace alias api ~/code/api-service   # then:  sauron workspace 6 api
+sauron workspace alias                          # list saved aliases
+sauron workspace unalias api                    # forget one
 ```
 
 It spins up a new iTerm2 window, throws it into native fullscreen (which gives
 it its own macOS Space), then splits it into a left column of `claude` panes and
-a right column with `sauron` on top.
-
-By default the launcher prefers an installed `sauron` on your `PATH`
-(`cargo install --path sauron`), falling back to a fresh local build. Override
-with `SAURON=/path`.
+a right column with `sauron` on top. The panes reopen each in-flight session
+(`claude --resume`) pulled straight from the scanner — the same set the TUI
+shows — and run `sauron` itself for the watcher, by the very path you invoked, so
+a restored window keeps working. Registry lives at `~/.claude/sauron/workspaces`.
 
 <details>
 <summary><b>Requirements</b></summary>
@@ -171,8 +170,7 @@ place.
 ## 🗂️ Layout
 
 ```
-sauron/   ·  Rust crate — the TUI sidecar
-workspace/    ·  iTerm2 multi-agent launcher
+sauron/   ·  Rust crate — the TUI sidecar and the `workspace` launcher
 ```
 
 <div align="center">

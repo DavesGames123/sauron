@@ -20,6 +20,7 @@ mod scan;
 mod scene;
 mod store;
 mod ui;
+mod workspace;
 
 use std::collections::BTreeMap;
 use std::os::unix::process::CommandExt;
@@ -437,8 +438,29 @@ fn base64(input: &[u8]) -> String {
     out
 }
 
+/// The in-flight sessions for a repo -- mid-turn (`Working`) or waiting on a
+/// background agent it spawned (`Delegated`) -- as `(session_id, display_name)`.
+/// The same set `--list-working` prints and the TUI shows, so `sauron workspace`
+/// reopens exactly the sessions the tool counts as live.
+fn in_flight_tasks(repo_root: PathBuf) -> Vec<(String, String)> {
+    let repo_root = repo_root.canonicalize().unwrap_or(repo_root);
+    App::new(repo_root)
+        .rows
+        .iter()
+        .filter(|r| matches!(r.status, Status::Working | Status::Delegated))
+        .map(|r| (r.id.clone(), model::collapse_ws(&r.name)))
+        .collect()
+}
+
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // `sauron workspace ...` -- open or manage the multi-agent iTerm layout.
+    // Handled before the repo/TUI path since it has its own argument grammar.
+    if args.first().map(|s| s.as_str()) == Some("workspace") {
+        return workspace::run(&args[1..]);
+    }
+
     let once = args.iter().any(|a| a == "--once");
     let baseline = args.iter().any(|a| a == "--baseline");
     let list_working = args.iter().any(|a| a == "--list-working");

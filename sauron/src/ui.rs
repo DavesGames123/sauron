@@ -34,7 +34,7 @@ const AMBER: Color = Color::Rgb(255, 176, 66); // awaiting acknowledgement
 const CYAN: Color = Color::Rgb(86, 205, 226); // agent still working
 const GREEN: Color = Color::Rgb(126, 200, 120); // nothing outstanding
 const BLUE: Color = Color::Rgb(120, 170, 255); // chrome / repo identity
-const DIM: Color = Color::Rgb(88, 94, 104);
+pub(crate) const DIM: Color = Color::Rgb(88, 94, 104);
 const INK: Color = Color::Rgb(18, 20, 24); // text on a filled badge
 const SAID: Color = Color::Rgb(158, 166, 178); // your last words, quoted back on a card
 const FILE: Color = Color::Rgb(214, 220, 228); // a modified file, named clearly
@@ -42,11 +42,11 @@ const PREVIEW: Color = Color::Rgb(132, 140, 152); // its most recent lines of te
 
 // The Eye of Sauron and its engraved verse. Kept apart from the status palette
 // above -- this is chrome flavour, never a signal, so it must not borrow a hue
-// that means something.
-const FLAME: Color = Color::Rgb(255, 122, 24); // the lidless eye, wreathed in fire
-const EMBER: Color = Color::Rgb(120, 22, 10); // the slit pupil, a hole in the flame
-const FLARE: Color = Color::Rgb(255, 176, 60); // the eye flaring wide
-const RUNE: Color = Color::Rgb(150, 70, 40); // the ring-verse, engraved and faint
+// that means something. Shared with the `scene` module (the five-line Eye).
+pub(crate) const FLAME: Color = Color::Rgb(255, 122, 24); // the lidless eye, wreathed in fire
+pub(crate) const EMBER: Color = Color::Rgb(120, 22, 10); // the slit pupil, a hole in the flame
+pub(crate) const FLARE: Color = Color::Rgb(255, 176, 60); // the eye flaring wide
+pub(crate) const RUNE: Color = Color::Rgb(150, 70, 40); // the engraved script, faint
 
 pub fn color_of(status: Status) -> Color {
     match status {
@@ -98,10 +98,18 @@ pub struct FrameGeometry {
 }
 
 pub fn draw(f: &mut Frame, v: &View, list_state: &mut ListState, geo: &mut FrameGeometry) {
+    // The full five-line Eye earns its keep only when the terminal is tall
+    // enough to spare the rows; below that the header collapses to the compact
+    // one-line Eye so the list and detail keep their space.
+    let header_h = if f.area().height >= 24 {
+        1 + crate::scene::HEIGHT
+    } else {
+        2
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
+            Constraint::Length(header_h),
             Constraint::Min(6),
             Constraint::Length(9),
             Constraint::Length(1),
@@ -188,13 +196,15 @@ fn header(f: &mut Frame, area: Rect, v: &View) {
         Style::default().fg(DIM),
     ));
 
-    f.render_widget(
-        Paragraph::new(vec![
-            Line::from(top),
-            engraved_rule(area.width as usize, v.anim_ms),
-        ]),
-        area,
-    );
+    // The status line always leads; below it, the full five-line Eye when there
+    // is room, else the compact one-line Eye engraved into the divider.
+    let mut lines = vec![Line::from(top)];
+    if area.height > crate::scene::HEIGHT {
+        lines.extend(crate::scene::scene(area.width as usize, v.anim_ms));
+    } else {
+        lines.push(engraved_rule(area.width as usize, v.anim_ms));
+    }
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 /// One pose of the lidless Eye. It is drawn in a fixed five glyphs -- two lashes

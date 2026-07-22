@@ -17,6 +17,7 @@
 
 mod model;
 mod scan;
+mod scene;
 mod store;
 mod ui;
 
@@ -43,7 +44,7 @@ const TICK: Duration = Duration::from_millis(2000);
 // the loop wakes on this shorter frame clock to redraw. ratatui diffs the
 // buffer and writes only changed cells, so an idle frame -- the Eye holding
 // still -- costs nothing on the wire.
-const FRAME: Duration = Duration::from_millis(120);
+const FRAME: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
 pub struct Row {

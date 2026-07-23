@@ -1,21 +1,31 @@
-//! The five-line animated Eye of Sauron that crowns the header when the terminal
-//! is tall enough. Everything here is a pure function of elapsed milliseconds, so
+//! The animated Eye of Sauron and its tower. Everything here is a pure function
+//! of elapsed milliseconds (and, for the war below, the running-agent count), so
 //! nothing has to be ticked or stored between frames and the whole thing is
 //! testable off the clock alone.
 //!
-//! What it shows:
-//!   - the lidless Eye (block art) atop its tower, at the right: it glances,
-//!     blinks, and flickers while idle;
-//!   - an engraving of Sindarin in runic script (real Unicode runes, U+16A0,
-//!     which render out of the box -- true Tengwar lives in the private-use area
-//!     and needs a font, so this stands in for it) with a faint gloss;
-//!   - and, now and then, Frodo and Sam scurrying along the ground with Gollum
-//!     creeping behind and the Ring glinting -- while the Eye's pupil tracks them
-//!     and flares wide as they pass beneath it.
+//! Two ways it draws, chosen by `ui::draw` from the terminal size:
+//!
+//!   - the compact five-line crown (`scene`), self-contained: the Eye atop a
+//!     stub of tower with Frodo/Sam/Gollum crossing the little ground beneath it;
+//!   - the whole tower, when there is room -- `crown` caps the header with the
+//!     Eye (its foot swapped for a shaft-cap so the stone keeps going), then
+//!     `tower_shaft` descends Barad-dûr down the right column of the list region,
+//!     and `battle_ground` lands its flared foot on a full-width horizon where a
+//!     battle rages. Each *working* agent is one of Sauron's orcs on the field,
+//!     so the war swells -- more fighters, arrow volleys, the fallen -- as more
+//!     of the swarm runs at once.
+//!
+//! It also shows an engraving of Sindarin in runic script (real Unicode runes,
+//! U+16A0, which render out of the box -- true Tengwar lives in the private-use
+//! area and needs a font, so this stands in for it) with a faint gloss.
 //!
 //! grep targets:
-//!   fn scene           -- compose the five lines for a given width and ms
-//!   fn eye_rows        -- the Eye sprite for a pose + pupil column
+//!   fn scene           -- the compact five-line crown (fallback), with walkers
+//!   fn crown           -- the header Eye when the whole tower is drawn below it
+//!   fn tower_shaft      -- the descending stone shaft (right column of the list)
+//!   fn battle_ground    -- the flared foot + the full-width war at its base
+//!   fn battle           -- musters both armies and animates the melee by ms
+//!   fn eye_tower        -- the Eye sprite for a pose + pupil column
 //!   fn walker_sprites  -- Frodo / Sam / Gollum, facing left or right
 //!   fn runic           -- latin -> Elder Futhark transliteration
 //!   const VERSES       -- the engraved Sindarin lines
@@ -26,17 +36,33 @@ use ratatui::text::{Line, Span};
 
 use crate::ui::{DIM, FLAME, FLARE, RUNE};
 
-/// Rows the scene occupies (not counting the status line above it).
+/// Rows the crown occupies in the header (not counting the status line above it).
 pub const HEIGHT: u16 = 5;
+
+/// Width of the right-hand column the descending shaft claims. Equal to
+/// `EYE_MARGIN`, so the shaft rect's left edge lands exactly under the Eye and
+/// the whole tower reads as one piece across the header/list seam.
+pub const TOWER_W: u16 = EYE_MARGIN as u16;
+
+/// Rows the war at the tower's foot claims, along the bottom of the list region:
+/// the flared foot lands on the top row, then two rows of melee, then the ground.
+pub const BASE_H: u16 = 4;
 
 const RING: Color = Color::Rgb(255, 214, 96); // the One Ring's glint
 const HOBBIT: Color = Color::Rgb(150, 190, 140); // Frodo & Sam
 const GOLLUM_C: Color = Color::Rgb(150, 172, 150); // the pale creeping thing
 const GROUND: Color = Color::Rgb(66, 70, 80); // the horizon the walkers cross
 const STONE: Color = Color::Rgb(92, 96, 112); // the black tower of Barad-dûr
+const STONE_D: Color = Color::Rgb(58, 62, 74); // the shaft's shadowed inner face
 const HOT: Color = Color::Rgb(255, 236, 150); // white-hot: flame tips and sparks
 const RED: Color = Color::Rgb(200, 54, 20); // deep red: the cool outer edge of the fire
 const PUPIL: Color = Color::Rgb(34, 14, 10); // near-black: the cute pupil, the focal point
+
+// The war at the foot of the tower.
+const FREE: Color = Color::Rgb(176, 206, 150); // the free peoples: elves, men, hobbits
+const ORC_C: Color = Color::Rgb(122, 158, 74); // sauron's orcs, pouring from the gate
+const STEEL: Color = Color::Rgb(178, 188, 200); // blades in the line, arrowheads in flight
+const BLOOD: Color = Color::Rgb(150, 40, 30); // the fallen, once the field turns grim
 
 // Timeline: one walk per 26s, crossing over ~7.5s, a long calm idle the rest.
 const PERIOD: u64 = 26_000;
@@ -346,6 +372,216 @@ pub fn scene(width: usize, ms: u64) -> Vec<Line<'static>> {
     grid.into_iter().map(row_to_line).collect()
 }
 
+// --- The whole tower: crown, shaft, and the war at its foot --------------------
+
+/// A single shaft segment: the two stone walls of Barad-dûr with a shadowed inner
+/// face between them. The walls sit at the same columns the Eye's stone frame
+/// does (1 and 11), so whatever the row's width, the crown flows into the shaft.
+fn shaft_row(width: usize) -> Vec<Cell> {
+    let stone = Style::default().fg(STONE);
+    let inner = Style::default().fg(STONE_D);
+    let mut r = blank_row(width);
+    r[1] = ('█', stone);
+    r[11] = ('█', stone);
+    for c in r.iter_mut().take(11).skip(2) {
+        *c = ('▓', inner);
+    }
+    r
+}
+
+/// The header crown when the whole tower is drawn below: the Eye and its verse,
+/// exactly as `scene` builds them, but with the flared foot swapped for a shaft
+/// segment so the stone keeps descending into `tower_shaft` instead of stopping.
+/// No ground and no walkers here -- those live at the foot now.
+pub fn crown(width: usize, ms: u64) -> Vec<Line<'static>> {
+    let w = width.max(20);
+    let mut grid: Vec<Vec<Cell>> = (0..5).map(|_| blank_row(w)).collect();
+
+    let t = ms % PERIOD;
+    let flicker = ((ms / 220) % 3) as usize;
+    let (pose, pupil) = idle_pose(t);
+    let eye_left = w.saturating_sub(EYE_MARGIN) as i32;
+
+    let mut rows = eye_tower(pose, pupil, flicker);
+    rows[4] = shaft_row(EYE_W); // the foot moves to the ground; the tower keeps going
+
+    for (r, row) in rows.into_iter().enumerate() {
+        for (i, (ch, st)) in row.into_iter().enumerate() {
+            if ch == ' ' {
+                continue;
+            }
+            let c = eye_left + i as i32;
+            if c >= 0 && (c as usize) < w {
+                grid[r][c as usize] = (ch, st);
+            }
+        }
+    }
+
+    let (words, gloss) = verse(ms);
+    let room = eye_left.max(2) as usize - 2;
+    stamp(&mut grid[1], 1, &clip(&runic(words), room), Style::default().fg(RUNE));
+    stamp(&mut grid[0], 1, &clip(gloss, room), Style::default().fg(DIM));
+
+    grid.into_iter().map(row_to_line).collect()
+}
+
+/// The tower shaft: `height` rows of Barad-dûr's stone, `TOWER_W` wide, meant for
+/// the right column of the list region directly beneath the crown. Arrow-slit
+/// windows glow at fixed rows and pulse with `ms`, so the black spire has a few
+/// lit eyes of its own without any of them wandering.
+pub fn tower_shaft(height: usize, ms: u64) -> Vec<Line<'static>> {
+    let mut out = Vec::with_capacity(height);
+    for r in 0..height {
+        let mut row = shaft_row(TOWER_W as usize);
+        // A slit every third row, alternating side; each pulses on its own phase.
+        if r % 3 == 1 {
+            let col = if (r / 3) % 2 == 0 { 4 } else { 8 };
+            let lit = (ms / 320 + r as u64) % 5 < 3;
+            row[col] = ('▪', Style::default().fg(if lit { FLAME } else { STONE_D }));
+        }
+        out.push(row_to_line(row));
+    }
+    out
+}
+
+/// The tower's foot and the war around it: `BASE_H` full-width rows for the very
+/// bottom of the list region. The flared foot lands on the top row; the ground
+/// runs the whole width along the bottom; and between them two armies fight, sized
+/// and stirred by `armies` -- the count of agents currently working.
+pub fn battle_ground(width: usize, armies: usize, ms: u64) -> Vec<Line<'static>> {
+    let w = width.max(20);
+    let n = BASE_H as usize;
+    let mut g: Vec<Vec<Cell>> = (0..n).map(|_| blank_row(w)).collect();
+    let eye_left = w.saturating_sub(EYE_MARGIN) as i32;
+
+    // The horizon everyone stands on.
+    let ground = Style::default().fg(GROUND);
+    for cell in g[n - 1].iter_mut() {
+        *cell = ('▁', ground);
+    }
+    // The flared foot of the tower, landing on the ground beneath the shaft.
+    stamp(&mut g[0], eye_left, "▟███████████▙", Style::default().fg(STONE));
+
+    battle(&mut g, eye_left, armies, ms);
+
+    g.into_iter().map(row_to_line).collect()
+}
+
+/// Set one cell if it is on the grid -- the battle's whole vocabulary is single
+/// glyphs, so this is all the drawing it needs.
+fn put(g: &mut [Vec<Cell>], row: usize, x: i32, ch: char, color: Color) {
+    if row < g.len() && x >= 0 && (x as usize) < g[row].len() {
+        g[row][x as usize] = (ch, Style::default().fg(color));
+    }
+}
+
+/// A free fighter -- elf, man, or (every third one) a hobbit -- charging right:
+/// head, then a blade that swings with the stride.
+fn place_free(g: &mut [Vec<Cell>], row: usize, x: i32, stride: usize, hobbit: bool) {
+    put(g, row, x, if hobbit { 'ó' } else { 'Å' }, FREE);
+    put(g, row, x + 1, if stride == 0 { '╱' } else { '╲' }, STEEL);
+}
+
+/// An orc pressing left out of the gate: a swung blade, then its head.
+fn place_orc(g: &mut [Vec<Cell>], row: usize, x: i32, stride: usize) {
+    put(g, row, x, if stride == 0 { '╲' } else { '╱' }, STEEL);
+    put(g, row, x + 1, 'ø', ORC_C);
+}
+
+/// A triangle wave in `[-amp, amp]` over `period`, integer-only so the sway of
+/// the battle line stays a pure function of the clock.
+fn tri(ms: u64, period: u64, amp: i32) -> i32 {
+    if amp == 0 || period == 0 {
+        return 0;
+    }
+    let half = (period / 2) as i32;
+    let p = (ms % period) as i32;
+    let up = if p < half { p } else { period as i32 - p }; // 0..=half
+    up * 2 * amp / half - amp
+}
+
+/// Muster and animate the melee. The two lines meet at a front that sways with the
+/// tide; how many fighters muster, how hard the line sways, how fast feet move,
+/// whether arrows fly and bodies fall -- all climb with `armies`. Zero working
+/// agents leaves an uneasy calm: one orc keeps the gate.
+fn battle(g: &mut [Vec<Cell>], eye_left: i32, armies: usize, ms: u64) {
+    let field_l = 1i32;
+    let field_r = eye_left - 2; // stop short of the tower's foot
+
+    if armies == 0 {
+        let stride = ((ms / 500) % 2) as usize; // a slow, bored shuffle
+        place_orc(g, 2, (field_r - 1).max(field_l), stride);
+        return;
+    }
+
+    let amp = (armies.min(5) as i32) / 2; // the tide swings wider in a bigger war
+    // The lines meet nearer the gate than the far edge: the free host besieges
+    // across most of the field, the orcs sally from the tower to meet them.
+    let front = field_l + (field_r - field_l) * 3 / 5 + tri(ms, 2200, amp);
+    // Feet quicken as the field fills; never so fast the stride blurs.
+    let stride_ms = 260u64.saturating_sub(armies.min(6) as u64 * 24).max(90);
+
+    let max_free = ((front - field_l) / 2).max(0) as usize;
+    let max_orc = ((field_r - front) / 2).max(0) as usize;
+    let n_free = armies.min(max_free);
+    let n_orc = armies.min(max_orc);
+
+    // The free peoples charge in from the left toward the front.
+    for i in 0..n_free {
+        let x = front - 2 - i as i32 * 2;
+        if x < field_l {
+            break;
+        }
+        let stride = ((ms / stride_ms + i as u64) % 2) as usize;
+        let leap = (ms / (stride_ms * 2) + i as u64 * 3).is_multiple_of(7); // an occasional lunge
+        place_free(g, if leap { 1 } else { 2 }, x, stride, i % 3 == 2);
+    }
+    // Orcs pour from the tower on the right, pressing toward the front.
+    for i in 0..n_orc {
+        let x = front + 1 + i as i32 * 2;
+        if x > field_r {
+            break;
+        }
+        let stride = ((ms / stride_ms + i as u64) % 2) as usize;
+        let leap = (ms / (stride_ms * 2) + i as u64 * 5).is_multiple_of(7);
+        place_orc(g, if leap { 1 } else { 2 }, x, stride);
+    }
+
+    // Where the lines meet, steel on steel -- a spark that jumps and changes shape.
+    if n_free > 0 && n_orc > 0 {
+        let ch = match (ms / 120) % 3 {
+            0 => '*',
+            1 => '+',
+            _ => '×',
+        };
+        let row = if (ms / 120).is_multiple_of(2) { 1 } else { 2 };
+        put(g, row, front, ch, HOT);
+    }
+
+    // Arrow volleys once the war is big enough: free shafts fly right, orc shafts
+    // left, arcing along the top rows.
+    if armies >= 3 {
+        let span = (field_r - field_l).max(1) as u64;
+        for j in 0..(1 + armies / 3) {
+            let fx = field_l + ((ms / 70 + j as u64 * 13) % span) as i32;
+            put(g, if (fx / 6) % 2 == 0 { 0 } else { 1 }, fx, '»', STEEL);
+            let ox = field_r - ((ms / 70 + j as u64 * 29) % span) as i32;
+            put(g, if (ox / 6) % 2 == 0 { 1 } else { 0 }, ox, '«', STEEL);
+        }
+    }
+
+    // The fallen, once it is truly grim -- laid on the ground, never over a glyph.
+    if armies >= 5 {
+        let span = (field_r - field_l).max(1) as u64;
+        for j in 0..armies / 2 {
+            let x = field_l + ((j as u64 * 37 + 5) % span) as i32;
+            if g[3][x as usize].0 == '▁' {
+                put(g, 3, x, 'x', BLOOD);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +644,70 @@ mod tests {
         // "th" collapses to a single thorn rune rather than two glyphs.
         assert_eq!(runic("th"), "ᚦ");
         assert_eq!(runic("teithant").chars().filter(|&c| c == 'ᚦ').count(), 1);
+    }
+
+    #[test]
+    fn crown_is_five_lines_and_never_overflows_width() {
+        for &w in &[24usize, 40, 80, 120] {
+            for ms in [0u64, 5_100, 11_700, 46_000, 999_999] {
+                let c = crown(w, ms);
+                assert_eq!(c.len(), 5, "w={w} ms={ms}");
+                for l in &c {
+                    assert!(line_width(l) <= w, "crown overflow at w={w} ms={ms}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tower_shaft_fills_its_column_with_stone() {
+        for &h in &[1usize, 4, 12, 40] {
+            let s = tower_shaft(h, 3_000);
+            assert_eq!(s.len(), h, "h={h}");
+            for l in &s {
+                assert_eq!(line_width(l), TOWER_W as usize, "shaft width off at h={h}");
+            }
+            // Every row carries the two stone walls of the spire.
+            assert!(line_text(&s[0]).contains('█'), "shaft has no wall");
+        }
+    }
+
+    #[test]
+    fn battle_ground_lands_the_foot_on_a_full_width_ground() {
+        for &w in &[24usize, 40, 80, 120] {
+            for &armies in &[0usize, 1, 3, 6, 20] {
+                let b = battle_ground(w, armies, 20_000);
+                assert_eq!(b.len(), BASE_H as usize, "w={w} armies={armies}");
+                for l in &b {
+                    assert!(line_width(l) <= w, "base overflow w={w} armies={armies}");
+                }
+                // The ground runs the full width along the bottom row.
+                assert_eq!(line_width(&b[BASE_H as usize - 1]), w, "ground not full width");
+                // The tower's foot is present on the top row.
+                assert!(line_text(&b[0]).contains('▙'), "no tower foot at w={w}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_war_swells_with_the_running_count() {
+        // More working agents -> more orcs on the field. Count orc heads at a
+        // fixed instant so only the muster size differs.
+        let orcs = |armies| -> usize {
+            battle_ground(80, armies, 20_000)
+                .iter()
+                .map(|l| line_text(l).matches('ø').count())
+                .sum()
+        };
+        assert!(orcs(6) > orcs(2), "a bigger swarm should field more orcs");
+        assert!(orcs(2) > orcs(0), "an idle gate should be quieter than a fought one");
+        // Arrow volleys only fly once the battle is big enough.
+        let has_arrows = |armies| {
+            battle_ground(80, armies, 20_000)
+                .iter()
+                .any(|l| line_text(l).contains('»') || line_text(l).contains('«'))
+        };
+        assert!(!has_arrows(1), "no volleys in a skirmish");
+        assert!(has_arrows(6), "a full assault looses arrows");
     }
 }

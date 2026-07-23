@@ -105,11 +105,9 @@ pub fn draw(f: &mut Frame, v: &View, list_state: &mut ListState, geo: &mut Frame
     // The full five-line Eye earns its keep only when the terminal is tall
     // enough to spare the rows; below that the header collapses to the compact
     // one-line Eye so the list and detail keep their space.
-    let header_h = if f.area().height >= 24 {
-        1 + crate::scene::HEIGHT
-    } else {
-        2
-    };
+    let full = f.area();
+    let tall = full.height >= 24;
+    let header_h = if tall { 1 + crate::scene::HEIGHT } else { 2 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -120,14 +118,61 @@ pub fn draw(f: &mut Frame, v: &View, list_state: &mut ListState, geo: &mut Frame
         ])
         .split(f.area());
 
-    header(f, chunks[0], v);
-    list(f, chunks[1], v, list_state, geo);
+    // Draw the whole tower -- shaft down the right column, the war at its foot --
+    // only when the terminal is tall AND wide enough to give both the room, and
+    // the list region has rows to spare beneath a short session list. Otherwise
+    // the header keeps its self-contained crown and the list keeps every column.
+    let tower_w = crate::scene::TOWER_W;
+    let base_h = crate::scene::BASE_H;
+    let mordor = tall
+        && full.width >= 64
+        && chunks[1].height >= base_h + 3
+        && chunks[1].width > tower_w + 24;
+
+    // The list gives up the shaft's column and the war's rows when Mordor is drawn.
+    let mut list_area = chunks[1];
+    if mordor {
+        list_area.width = list_area.width.saturating_sub(tower_w);
+        list_area.height = list_area.height.saturating_sub(base_h);
+    }
+
+    header(f, chunks[0], v, mordor);
+    list(f, list_area, v, list_state, geo);
     detail(f, chunks[2], v.rows.get(v.selected), v.now);
     footer(f, chunks[3], v);
+
+    if mordor {
+        // The shaft descends the right column, from the top of the list region to
+        // just above the war band; its top row meets the crown's shaft-cap at the
+        // header seam, so the stone reads as one continuous spire.
+        let shaft = Rect {
+            x: full.width - tower_w,
+            y: chunks[1].y,
+            width: tower_w,
+            height: chunks[1].height.saturating_sub(base_h),
+        };
+        f.render_widget(
+            Paragraph::new(crate::scene::tower_shaft(shaft.height as usize, v.anim_ms)),
+            shaft,
+        );
+        // The war at the foot, full width along the bottom of the list region. Its
+        // size tracks the count of agents currently working -- each is one orc.
+        let armies = v.rows.iter().filter(|r| r.status == Status::Working).count();
+        let base = Rect {
+            x: chunks[1].x,
+            y: chunks[1].bottom() - base_h,
+            width: full.width,
+            height: base_h,
+        };
+        f.render_widget(
+            Paragraph::new(crate::scene::battle_ground(full.width as usize, armies, v.anim_ms)),
+            base,
+        );
+    }
     let _ = chunks;
 }
 
-fn header(f: &mut Frame, area: Rect, v: &View) {
+fn header(f: &mut Frame, area: Rect, v: &View, mordor: bool) {
     let awaiting = v.rows.iter().filter(|r| r.status == Status::NeedsTest).count();
     let working = v.rows.iter().filter(|r| r.status == Status::Working).count();
     let delegated = v.rows.iter().filter(|r| r.status == Status::Delegated).count();
@@ -208,11 +253,17 @@ fn header(f: &mut Frame, area: Rect, v: &View) {
         Style::default().fg(DIM),
     ));
 
-    // The status line always leads; below it, the full five-line Eye when there
-    // is room, else the compact one-line Eye engraved into the divider.
+    // The status line always leads; below it, the Eye. When the whole tower is
+    // drawn, the header shows the `crown` (its foot swapped for a shaft-cap so the
+    // stone descends into the list region); otherwise the self-contained five-line
+    // scene, and when there is no room at all the one-line Eye engraved in a rule.
     let mut lines = vec![Line::from(top)];
     if area.height > crate::scene::HEIGHT {
-        lines.extend(crate::scene::scene(area.width as usize, v.anim_ms));
+        if mordor {
+            lines.extend(crate::scene::crown(area.width as usize, v.anim_ms));
+        } else {
+            lines.extend(crate::scene::scene(area.width as usize, v.anim_ms));
+        }
     } else {
         lines.push(engraved_rule(area.width as usize, v.anim_ms));
     }

@@ -63,6 +63,38 @@ orcs rely on, and every pane `workspace` opens (the watcher pane is launched as
 
 ---
 
+## Local models (Mordor)
+
+`sauron workspace --mordor` runs the **servants** — hobbits and orcs — against a
+**local** model instead of the hosted API. The Eye itself calls no model, so this
+touches exactly one thing: the env prepended to each servant pane command. It is
+produced by `Agent::local_env(Option<&Mordor>)` in `src/agent.rs` and inserted
+right before the `claude` word by the `workspace` launcher:
+
+```
+cd repo && ANTHROPIC_BASE_URL=… ANTHROPIC_AUTH_TOKEN=ollama ANTHROPIC_API_KEY= \
+           ANTHROPIC_MODEL=<tag> ANTHROPIC_SMALL_FAST_MODEL=<tag> \
+           ANTHROPIC_DEFAULT_HAIKU_MODEL=<tag> claude --resume <id>
+```
+
+This rides [Ollama's Anthropic-compatible API][ollama-cc] — Claude Code's own wire
+format — so **no proxy** is involved. The `Mordor` struct carries the model tag
+(default `qwen3-coder`) and the base url (default local Ollama, overridable with
+`$SAURON_MORDOR_URL`); the main and background models are pinned to the same tag so
+a single-model box never reaches for a `haiku`-class model it never pulled.
+
+**Per-agent.** `local_env` is agent-dispatched. Claude Code emits the `ANTHROPIC_*`
+block; **Codex** returns empty, because its local path is `codex --oss`, a
+different wiring — so the launcher warns and drops `--mordor` under `--codex`
+rather than silently running against the hosted API. A new agent with an
+Anthropic-compatible local endpoint slots in by returning the same block; one with
+its own scheme returns whatever it needs (a flag baked into `run_cmd`/`resume_cmd`,
+its own env), all behind the one seam.
+
+[ollama-cc]: https://docs.ollama.com/integrations/claude-code
+
+---
+
 ## Codex
 
 sauron reads Codex rollouts from `~/.codex/sessions/**/*.jsonl`. It matches a

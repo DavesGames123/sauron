@@ -143,6 +143,7 @@ sauron workspace 8                # …suggesting 8 panes
 sauron workspace 8 <project>      # a specific project — count & project any order
 sauron workspace 8 .              # the current folder, explicitly
 sauron workspace 5 --orcs 2       # 5 hobbits + 2 orcs (see below)
+sauron workspace 5 --mordor       # run the swarm on a local model (see 🌋 below)
 sauron workspace 8 <project> -y   # skip the prompt (also skipped when scripted)
 ```
 
@@ -204,6 +205,77 @@ a restored window keeps working. Registry lives at `~/.claude/sauron/workspaces`
   fullscreen toggle.
 
 </details>
+
+---
+
+## 🌋 Mordor mode — a local swarm
+
+> **Off the grid. Your servants toil on a model of your own, on your own iron.**
+
+`--mordor` runs the **hobbits and orcs** against a **local** model instead of the
+hosted API — the whole swarm, no tokens billed, no network. The **Eye stays on the
+hosted API** (it only reads logs; it never calls a model), so nothing about the
+watch changes.
+
+It rides on [Ollama's Anthropic-compatible API][ollama-cc] — Claude Code speaks to
+a local model with **no proxy and no translation layer**, just a few env vars that
+sauron prepends to each servant pane:
+
+```bash
+sauron workspace 5 --mordor                    # 5 hobbits on the local model
+sauron workspace 5 --mordor --orcs 2           # …and 2 local orcs
+sauron workspace 5 --mordor=qwen2.5-coder:7b   # pick the model (see below)
+```
+
+### Prerequisites
+
+```bash
+# 1 · install Ollama, then pull the coder the swarm will run on
+ollama pull qwen3-coder      # the default — Qwen3-Coder, the strongest local coder
+ollama serve                 # (usually already running on :11434)
+```
+
+### What it does
+
+For every hobbit and orc pane, sauron prepends the local endpoint before the
+`claude` word — so `cd repo && claude …` becomes:
+
+```bash
+cd repo && ANTHROPIC_BASE_URL=http://localhost:11434 \
+           ANTHROPIC_AUTH_TOKEN=ollama ANTHROPIC_API_KEY= \
+           ANTHROPIC_MODEL=qwen3-coder \
+           ANTHROPIC_SMALL_FAST_MODEL=qwen3-coder \
+           ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen3-coder \
+           claude --resume <id>
+```
+
+The background/small-fast model is pinned to the **same** local tag, so a
+single-model box never has a background call reach for a `haiku`-class model you
+never pulled. The confirmation dialogue names the realm so a local launch is never
+mistaken for an ordinary one:
+
+```
+  sauron workspace  →  /Users/you/code/worldsmith   (claude · 🌋 Mordor: qwen3-coder @ http://localhost:11434)
+```
+
+### The model
+
+The default is **`qwen3-coder`** — Qwen3-Coder, a 30B MoE agentic coder (256K
+context) and the strongest local coding model that fits a 32GB Mac or a 24–32GB
+GPU. Override it inline, and point at a non-default Ollama with `$SAURON_MORDOR_URL`:
+
+| Want | Do |
+|:--|:--|
+| The default coder | `--mordor` |
+| A specific tag | `--mordor=qwen2.5-coder:7b` (the right call on an 8GB box) |
+| A remote / non-standard Ollama | `SAURON_MORDOR_URL=http://box:11434 sauron workspace 4 --mordor` |
+
+> **Claude Code only, for now.** Mordor rides Ollama's *Anthropic*-compatible API,
+> which is Claude Code's wire format. Codex reaches local models a different way
+> (`codex --oss`), so `--mordor` warns and no-ops under `--codex` rather than
+> silently running against the hosted API.
+
+[ollama-cc]: https://docs.ollama.com/integrations/claude-code
 
 ---
 

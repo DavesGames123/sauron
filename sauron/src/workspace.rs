@@ -20,7 +20,7 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::agent::Agent;
+use crate::agent::{Agent, Mordor};
 use crate::scan::home;
 
 /// Entry point for `sauron workspace <args>` (args are everything after the
@@ -63,6 +63,9 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
     // order-independent -- a purely-numeric arg is the pane count, else the project.
     let mut orcs = 0usize;
     let mut yes = false; // skip the confirmation dialogue
+    // Mordor mode: run the servants against a local model. `--mordor` takes the
+    // Qwen default; `--mordor=<tag>` picks another Ollama model.
+    let mut mordor: Option<Mordor> = None;
     let mut pos: Vec<&str> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -78,6 +81,12 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
             i += 2;
         } else if let Some(rest) = a.strip_prefix("--orcs=") {
             orcs = rest.parse().unwrap_or(0);
+            i += 1;
+        } else if a == "--mordor" {
+            mordor = Some(Mordor::new(None));
+            i += 1;
+        } else if let Some(rest) = a.strip_prefix("--mordor=") {
+            mordor = Some(Mordor::new(Some(rest.to_string())));
             i += 1;
         } else if a == "--yes" || a == "-y" {
             yes = true;
@@ -129,6 +138,22 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
     // else auto-detect from this repo's logs.
     let agent = Agent::select(explicit_agent, &repo);
 
+    // Mordor targets Claude Code, which reaches a local model through Ollama's
+    // Anthropic-compatible API. Codex's local path is `codex --oss`, a different
+    // wiring not plumbed here -- so refuse rather than silently launch Codex
+    // against the hosted API under a flag that promised local.
+    if mordor.is_some() && agent != Agent::Claude {
+        eprintln!(
+            "sauron workspace: --mordor (local models) currently targets Claude Code via Ollama's Anthropic-compatible API."
+        );
+        eprintln!(
+            "  for {}, run its panes with `{} --oss` instead. Ignoring --mordor.",
+            agent.label(),
+            agent.label()
+        );
+        mordor = None;
+    }
+
     let work = crate::in_flight_tasks(repo.clone(), agent);
     // Pane count: explicit arg wins; else one per in-flight task; else 4 bare.
     let default_panes = n_arg.unwrap_or(if work.is_empty() { 4 } else { work.len() });
@@ -144,7 +169,7 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
     let (total, orcs) = if dry || yes || !std::io::stdin().is_terminal() {
         (default_panes, orcs)
     } else {
-        match confirm(&repo_s, agent.label(), default_panes, orcs) {
+        match confirm(&repo_s, agent.label(), mordor.as_ref(), default_panes, orcs) {
             Some(v) => v,
             None => {
                 println!("sauron workspace: cancelled — nothing opened.");
@@ -173,7 +198,7 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
     };
     let orc_cmds: Vec<String> = orc_targets
         .iter()
-        .map(|t| orc_command(&repo_s, t, agent))
+        .map(|t| orc_command(&repo_s, t, agent, mordor.as_ref()))
         .collect();
 
     // Dry run: report the plan and stop, before touching iTerm (used by tests
@@ -181,6 +206,9 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
     if dry {
         println!("REPO={repo_s}");
         println!("AGENT={}", agent.label());
+        if let Some(m) = &mordor {
+            println!("MORDOR={}@{}", m.model, m.base_url);
+        }
         println!("TOTAL={total}");
         println!("SAURON={}", sauron_exe.display());
         for t in &orc_targets {
@@ -189,7 +217,15 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
         return Ok(());
     }
 
-    let script = applescript(&repo_s, &sauron_exe.to_string_lossy(), total, &work, &orc_cmds, agent);
+    let script = applescript(
+        &repo_s,
+        &sauron_exe.to_string_lossy(),
+        total,
+        &work,
+        &orc_cmds,
+        agent,
+        mordor.as_ref(),
+    );
     osascript(&script)?;
 
     let resumed = total.min(work.len());
@@ -202,6 +238,12 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
         "sauron workspace: opened {total}-pane layout on a new Space ({resumed} resumed working task(s), {} new{orc_note}) — repo: {repo_s}",
         total - resumed
     );
+    if let Some(m) = &mordor {
+        println!(
+            "  Mordor: hobbits & orcs run the local model '{}' via Ollama ({}) — the Eye stays on the hosted API.",
+            m.model, m.base_url
+        );
+    }
     Ok(())
 }
 
@@ -322,9 +364,21 @@ fn default_repo() -> PathBuf {
 /// A quick interactive confirmation before opening a cockpit. Shows the repo and
 /// agent, lets you adjust the pane and orc counts, and confirms. Returns the
 /// `(panes, orcs)` to open, or `None` to cancel.
-fn confirm(repo: &str, agent: &str, panes: usize, orcs: usize) -> Option<(usize, usize)> {
+fn confirm(
+    repo: &str,
+    agent: &str,
+    mordor: Option<&Mordor>,
+    panes: usize,
+    orcs: usize,
+) -> Option<(usize, usize)> {
     println!();
-    println!("  sauron workspace  →  {repo}   ({agent})");
+    // Name the realm so a Mordor launch never looks like an ordinary one -- local
+    // model and endpoint, right where you confirm the count.
+    let realm = match mordor {
+        Some(m) => format!("{agent} · Mordor: {} @ {}", m.model, m.base_url),
+        None => agent.to_string(),
+    };
+    println!("  sauron workspace  →  {repo}   ({realm})");
     let panes = ask_count("panes", panes)?;
     let orcs = ask_count("orcs ", orcs)?;
     print!("  launch {panes} pane(s), {orcs} orc(s)? [Y/n] ");
@@ -390,12 +444,17 @@ fn applescript(
     work: &[(String, String)],
     orc_cmds: &[String],
     agent: Agent,
+    mordor: Option<&Mordor>,
 ) -> String {
-    // Left column: resume each in-flight session, a fresh agent for the rest.
+    // Left column: resume each in-flight session, a fresh agent for the rest. In
+    // Mordor mode each hobbit carries the local-model env before the agent word;
+    // the orcs already carry theirs (built in `orc_command`), and the sauron
+    // watcher pane deliberately does not -- the Eye calls no model.
+    let env = agent.local_env(mordor);
     let left: Vec<String> = (0..total)
         .map(|i| match work.get(i) {
-            Some((id, _)) => format!("cd {repo} && {}", agent.resume_cmd(id)),
-            None => format!("cd {repo} && {}", agent.label()),
+            Some((id, _)) => format!("cd {repo} && {env}{}", agent.resume_cmd(id)),
+            None => format!("cd {repo} && {env}{}", agent.label()),
         })
         .collect();
     let sauron_flag = agent.label(); // watcher pane matches the chosen agent
@@ -534,14 +593,16 @@ fn is_code(path: &str) -> bool {
 /// The single-shot task an orc runs against its cold target. Single-quoted for
 /// the shell and free of both quote kinds, so it survives the AppleScript
 /// double-quoted string it is embedded in.
-fn orc_command(repo: &str, target: &str, agent: Agent) -> String {
+fn orc_command(repo: &str, target: &str, agent: Agent, mordor: Option<&Mordor>) -> String {
     // The prompt carries model::ORC_MARKER so sauron recognises the session as
     // one of its own orcs and marks it distinct in the TUI.
     let prompt = format!(
         "This file is safe to refactor -- {marker}. Make one focused pass on {target}: decompose it if it is overly large -- split it into a well-organised, clearly documented nested module / filetree where that is the natural structure -- tighten what remains, and clear any compiler or linter warnings it produces. Keep behaviour identical and every test passing; confine the change to {target} and the files you split out of it.",
         marker = crate::model::ORC_MARKER,
     );
-    format!("cd {repo} && {}", agent.run_cmd(&prompt))
+    // In Mordor mode the env prefix redirects this orc to the local model, right
+    // before the agent word: `cd repo && ANTHROPIC_...=... claude '<prompt>'`.
+    format!("cd {repo} && {}{}", agent.local_env(mordor), agent.run_cmd(&prompt))
 }
 
 /// Pipe the AppleScript to `osascript` on stdin, exactly as the shell heredoc did.
@@ -570,7 +631,7 @@ mod tests {
     #[test]
     fn applescript_lists_one_command_per_pane() {
         let work = vec![("id-1".to_string(), "task one".to_string())];
-        let s = applescript("/repo", "/bin/sauron", 3, &work, &[], Agent::Claude);
+        let s = applescript("/repo", "/bin/sauron", 3, &work, &[], Agent::Claude, None);
         // First hobbit pane resumes the working task; the rest are bare claude.
         assert!(s.contains("cd /repo && claude --resume id-1"));
         assert_eq!(s.matches("cd /repo && claude").count(), 3); // resume line counts too
@@ -582,8 +643,8 @@ mod tests {
     #[test]
     fn applescript_stacks_orcs_beneath_sauron() {
         let work = vec![("id-1".into(), "t".into())];
-        let orcs = vec![orc_command("/repo", "src/big.rs", Agent::Claude)];
-        let s = applescript("/repo", "/bin/sauron", 2, &work, &orcs, Agent::Claude);
+        let orcs = vec![orc_command("/repo", "src/big.rs", Agent::Claude, None)];
+        let s = applescript("/repo", "/bin/sauron", 2, &work, &orcs, Agent::Claude, None);
         assert!(s.contains("cd /repo && /bin/sauron --claude")); // watcher on top-right
         assert!(s.contains("claude --resume id-1")); // a hobbit on the left
         assert!(s.contains("src/big.rs")); // the orc's target
@@ -598,11 +659,33 @@ mod tests {
     #[test]
     fn codex_agent_swaps_the_spawn_commands() {
         let work = vec![("id-1".into(), "t".into())];
-        let orcs = vec![orc_command("/repo", "src/big.rs", Agent::Codex)];
-        let s = applescript("/repo", "/bin/sauron", 1, &work, &orcs, Agent::Codex);
+        let orcs = vec![orc_command("/repo", "src/big.rs", Agent::Codex, None)];
+        let s = applescript("/repo", "/bin/sauron", 1, &work, &orcs, Agent::Codex, None);
         assert!(s.contains("codex resume id-1")); // hobbit resumes via codex
         assert!(s.contains("codex exec 'This file is safe")); // orc runs codex exec
         assert!(s.contains("/bin/sauron --codex")); // watcher pane watches codex
+    }
+
+    #[test]
+    fn mordor_wires_hobbits_and_orcs_to_the_local_model_but_not_the_eye() {
+        let m = Mordor {
+            model: "qwen3-coder".into(),
+            base_url: "http://localhost:11434".into(),
+        };
+        let work = vec![("id-1".into(), "t".into())];
+        let orcs = vec![orc_command("/repo", "src/big.rs", Agent::Claude, Some(&m))];
+        let s = applescript("/repo", "/bin/sauron", 2, &work, &orcs, Agent::Claude, Some(&m));
+
+        // The hobbit pane carries the local endpoint before the `claude` word.
+        assert!(s.contains("cd /repo && ANTHROPIC_BASE_URL=http://localhost:11434"));
+        assert!(s.contains("ANTHROPIC_MODEL=qwen3-coder ANTHROPIC_SMALL_FAST_MODEL"));
+        // …and it still resumes the working session, now through the local model.
+        assert!(s.contains("ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen3-coder claude --resume id-1"));
+        // The orc too, before its single-shot prompt.
+        assert!(s.contains("=qwen3-coder claude 'This file is safe"));
+        // But the Eye pane never gets the env -- sauron calls no model.
+        assert!(s.contains("cd /repo && /bin/sauron --claude"));
+        assert!(!s.contains("ANTHROPIC_BASE_URL=http://localhost:11434 /bin/sauron"));
     }
 
     #[test]
@@ -617,7 +700,7 @@ mod tests {
 
     #[test]
     fn orc_command_targets_the_file_without_double_quotes() {
-        let c = orc_command("/repo", "src/big.rs", Agent::Claude);
+        let c = orc_command("/repo", "src/big.rs", Agent::Claude, None);
         assert!(c.starts_with("cd /repo && claude '"));
         assert!(c.contains("src/big.rs"));
         // No double quotes, or it would break the AppleScript string it sits in.

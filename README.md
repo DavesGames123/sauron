@@ -22,7 +22,7 @@ A read-only sidecar for running **many coding agents at once** — [Claude Code]
 ![ratatui](https://img.shields.io/badge/TUI-ratatui-7C3AED?style=for-the-badge)
 ![Agents](https://img.shields.io/badge/agents-Claude_·_Codex-FF7A18?style=for-the-badge)
 ![macOS](https://img.shields.io/badge/workspace-macOS_·_iTerm2-000000?style=for-the-badge&logo=apple&logoColor=white)
-![Read only](https://img.shields.io/badge/repo_writes-none-2EA043?style=for-the-badge)
+![Read only](https://img.shields.io/badge/watcher_repo_writes-none-2EA043?style=for-the-badge)
 
 </div>
 
@@ -47,8 +47,8 @@ code and becomes *trusting* it. Which sessions actually touched the repo? Which
 are quietly **blocked on a question only you can answer**? What have you already
 reviewed? **sauron** answers exactly that — and nothing else.
 
-It reads each agent's session logs, re-tailing every two seconds. It **writes
-nothing to your repo** and **never talks to a running agent**.
+The watcher reads each agent's session logs, re-tailing every two seconds. It
+**writes nothing to your repo** and **never talks to a running agent**.
 
 ---
 
@@ -101,7 +101,7 @@ A subcommand of the same binary. One command, a whole cockpit:
 ## 🚀 Quick start
 
 ```bash
-# 1 · build the sidecar
+# 1 · build the sidecar and Agent Clipboard
 cargo build --release --manifest-path sauron/Cargo.toml
 
 # 2 · watch the repo you're standing in
@@ -114,7 +114,7 @@ cargo build --release --manifest-path sauron/Cargo.toml
 Drop it on your `PATH` to call it from anywhere:
 
 ```bash
-cp sauron/target/release/sauron /usr/local/bin/
+cp sauron/target/release/sauron sauron/target/release/clip /usr/local/bin/
 ```
 
 ---
@@ -133,6 +133,33 @@ cp sauron/target/release/sauron /usr/local/bin/
 
 ---
 
+## 📋 Agent Clipboard
+
+Sauron includes a Rust implementation of the
+[Forge Agent Clipboard](https://github.com/alvinlu7/forge). It preserves the
+SQLite schema, FTS5 index, JSON record shape, TTL/version/checksum behavior, and
+validated-before-pin policy, so the Python and Rust tools can share one database.
+
+Use either entry point:
+
+```bash
+clip put project.current.invariants --file invariants.md --namespace project
+clip search "project invariants" --namespace project --json
+clip get project.current.invariants
+
+# The same CLI is available through the Sauron binary.
+sauron clip copy project.current.invariants
+```
+
+The complete command surface is `put`, `update`, `get`, `copy`, `search`, `list`,
+`recent`, `pin`, `delete`, `export`, `import`, `stats`, `doctor`, and `gc`.
+Override storage with `--db PATH` / `--db-path PATH` or
+`$AGENT_CLIPBOARD_DB`. Otherwise Sauron reuses an ancestor
+`.agent-clipboard/clipboard.sqlite3` when present, then falls back to the normal
+platform data directory.
+
+---
+
 ## 🪟 `sauron workspace` — the multi-agent cockpit
 
 > **macOS + iTerm2 only.**
@@ -143,6 +170,7 @@ sauron workspace 8                # …suggesting 8 panes
 sauron workspace 8 <project>      # a specific project — count & project any order
 sauron workspace 8 .              # the current folder, explicitly
 sauron workspace 5 --orcs 2       # 5 hobbits + 2 orcs (see below)
+sauron workspace 5 --clipboard-handoff  # strict read-at-start/write-at-end passes
 sauron workspace 8 <project> -y   # skip the prompt (also skipped when scripted)
 ```
 
@@ -158,6 +186,26 @@ containing your cwd) and asks a quick question first:
 
 Press Enter to accept each, type a number to change it, `q` to bail. Pass `-y`
 (or pipe/redirect stdin) to skip the dialogue entirely.
+
+### Strict clipboard handoffs
+
+`--clipboard-handoff` wraps every launched hobbit and orc in an opt-in continuity
+gate:
+
+1. Before the agent starts, Sauron opens the clipboard, loads the exact prior
+   lane handoff plus the highest-signal entries for this repository, and injects
+   that context into the first prompt.
+2. Before the agent exits, its instructions require a structured JSON handoff:
+   completed work, repo/test state, invariants and decisions, blockers, and the
+   precise next action.
+3. After exit, Sauron reopens the database and verifies that the lane key has a
+   new version containing the pass nonce. A missing or unreadable handoff marks
+   the pass incomplete with exit code `3`.
+
+Keys and namespaces are deterministic from the canonical repository path and
+workspace lane, keeping parallel panes separate while allowing every later pass
+to retrieve the repository's recent handoffs. Without the flag, workspace launch
+commands and behavior are unchanged.
 
 ### 👹 orcs — the maintenance swarm
 
@@ -285,6 +333,8 @@ sauron/src/
   model.rs      ·  session model, status classification (agent-agnostic)
   ui.rs         ·  the TUI
   scene.rs      ·  the animated Eye
+  clip/         ·  SQLite-compatible Agent Clipboard store + CLI
+  handoff.rs    ·  strict opt-in clipboard pass lifecycle
   workspace.rs  ·  the `sauron workspace` launcher (hobbits + orcs)
 docs/AGENTS.md  ·  using Codex, and adding another agent
 ```

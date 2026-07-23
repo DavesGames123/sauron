@@ -16,7 +16,9 @@
 //!   fn main             -- terminal lifecycle and event loop
 
 mod agent;
+mod clip;
 mod codex;
+mod handoff;
 mod model;
 mod scan;
 mod scene;
@@ -478,6 +480,18 @@ fn hot_files(repo_root: PathBuf, agent: Agent) -> std::collections::BTreeSet<Str
 
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // The clipboard is available both as `sauron clip ...` and as the
+    // standalone `clip` binary. Keep it before the watcher argument grammar.
+    if args.first().map(|s| s.as_str()) == Some("clip") {
+        std::process::exit(clip::run(args[1..].to_vec()));
+    }
+
+    // Internal strict-lifecycle wrapper emitted by `workspace
+    // --clipboard-handoff`; intentionally omitted from the public CLI surface.
+    if args.first().map(|s| s.as_str()) == Some("handoff-run") {
+        return handoff::run(&args[1..]);
+    }
 
     // Which agent to watch: an explicit `--claude`/`--codex` flag; otherwise
     // `$SAURON_AGENT`, then auto-detect (resolved once the repo is known).

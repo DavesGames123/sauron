@@ -62,6 +62,7 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
     // while the hobbits do the directed work. The rest is [init] [N] [project],
     // order-independent -- a purely-numeric arg is the pane count, else the project.
     let mut orcs = 0usize;
+    let mut clipboard_handoff = false;
     let mut yes = false; // skip the confirmation dialogue
     let mut pos: Vec<&str> = Vec::new();
     let mut i = 0;
@@ -81,6 +82,9 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
             i += 1;
         } else if a == "--yes" || a == "-y" {
             yes = true;
+            i += 1;
+        } else if a == "--clipboard-handoff" {
+            clipboard_handoff = true;
             i += 1;
         } else if a == "--codex" || a == "--claude" {
             // Consumed at the top level into `explicit_agent`; skip here.
@@ -173,7 +177,23 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
     };
     let orc_cmds: Vec<String> = orc_targets
         .iter()
-        .map(|t| orc_command(&repo_s, t, agent))
+        .enumerate()
+        .map(|(index, target)| {
+            if clipboard_handoff {
+                let key = crate::handoff::handoff_key(&repo, &format!("orc.{index}"));
+                crate::handoff::workspace_command(
+                    &repo,
+                    &sauron_exe,
+                    agent,
+                    &key,
+                    None,
+                    Some(&orc_prompt(target)),
+                    true,
+                )
+            } else {
+                orc_command(&repo_s, target, agent)
+            }
+        })
         .collect();
 
     // Dry run: report the plan and stop, before touching iTerm (used by tests
@@ -182,6 +202,7 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
         println!("REPO={repo_s}");
         println!("AGENT={}", agent.label());
         println!("TOTAL={total}");
+        println!("CLIPBOARD_HANDOFF={clipboard_handoff}");
         println!("SAURON={}", sauron_exe.display());
         for t in &orc_targets {
             println!("ORC={t}");
@@ -189,7 +210,15 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
         return Ok(());
     }
 
-    let script = applescript(&repo_s, &sauron_exe.to_string_lossy(), total, &work, &orc_cmds, agent);
+    let script = applescript(
+        &repo_s,
+        &sauron_exe.to_string_lossy(),
+        total,
+        &work,
+        &orc_cmds,
+        agent,
+        clipboard_handoff,
+    );
     osascript(&script)?;
 
     let resumed = total.min(work.len());
@@ -390,10 +419,35 @@ fn applescript(
     work: &[(String, String)],
     orc_cmds: &[String],
     agent: Agent,
+    clipboard_handoff: bool,
 ) -> String {
     // Left column: resume each in-flight session, a fresh agent for the rest.
     let left: Vec<String> = (0..total)
         .map(|i| match work.get(i) {
+            Some((id, _)) if clipboard_handoff => {
+                let key = crate::handoff::handoff_key(Path::new(repo), &format!("slot.{i}"));
+                crate::handoff::workspace_command(
+                    Path::new(repo),
+                    Path::new(sauron_exe),
+                    agent,
+                    &key,
+                    Some(id),
+                    None,
+                    false,
+                )
+            }
+            None if clipboard_handoff => {
+                let key = crate::handoff::handoff_key(Path::new(repo), &format!("slot.{i}"));
+                crate::handoff::workspace_command(
+                    Path::new(repo),
+                    Path::new(sauron_exe),
+                    agent,
+                    &key,
+                    None,
+                    None,
+                    false,
+                )
+            }
             Some((id, _)) => format!("cd {repo} && {}", agent.resume_cmd(id)),
             None => format!("cd {repo} && {}", agent.label()),
         })
@@ -535,13 +589,16 @@ fn is_code(path: &str) -> bool {
 /// the shell and free of both quote kinds, so it survives the AppleScript
 /// double-quoted string it is embedded in.
 fn orc_command(repo: &str, target: &str, agent: Agent) -> String {
+    format!("cd {repo} && {}", agent.run_cmd(&orc_prompt(target)))
+}
+
+fn orc_prompt(target: &str) -> String {
     // The prompt carries model::ORC_MARKER so sauron recognises the session as
     // one of its own orcs and marks it distinct in the TUI.
-    let prompt = format!(
+    format!(
         "This file is safe to refactor -- {marker}. Make one focused pass on {target}: decompose it if it is overly large -- split it into a well-organised, clearly documented nested module / filetree where that is the natural structure -- tighten what remains, and clear any compiler or linter warnings it produces. Keep behaviour identical and every test passing; confine the change to {target} and the files you split out of it.",
         marker = crate::model::ORC_MARKER,
-    );
-    format!("cd {repo} && {}", agent.run_cmd(&prompt))
+    )
 }
 
 /// Pipe the AppleScript to `osascript` on stdin, exactly as the shell heredoc did.
@@ -570,7 +627,15 @@ mod tests {
     #[test]
     fn applescript_lists_one_command_per_pane() {
         let work = vec![("id-1".to_string(), "task one".to_string())];
-        let s = applescript("/repo", "/bin/sauron", 3, &work, &[], Agent::Claude);
+        let s = applescript(
+            "/repo",
+            "/bin/sauron",
+            3,
+            &work,
+            &[],
+            Agent::Claude,
+            false,
+        );
         // First hobbit pane resumes the working task; the rest are bare claude.
         assert!(s.contains("cd /repo && claude --resume id-1"));
         assert_eq!(s.matches("cd /repo && claude").count(), 3); // resume line counts too
@@ -583,7 +648,15 @@ mod tests {
     fn applescript_stacks_orcs_beneath_sauron() {
         let work = vec![("id-1".into(), "t".into())];
         let orcs = vec![orc_command("/repo", "src/big.rs", Agent::Claude)];
-        let s = applescript("/repo", "/bin/sauron", 2, &work, &orcs, Agent::Claude);
+        let s = applescript(
+            "/repo",
+            "/bin/sauron",
+            2,
+            &work,
+            &orcs,
+            Agent::Claude,
+            false,
+        );
         assert!(s.contains("cd /repo && /bin/sauron --claude")); // watcher on top-right
         assert!(s.contains("claude --resume id-1")); // a hobbit on the left
         assert!(s.contains("src/big.rs")); // the orc's target
@@ -599,7 +672,15 @@ mod tests {
     fn codex_agent_swaps_the_spawn_commands() {
         let work = vec![("id-1".into(), "t".into())];
         let orcs = vec![orc_command("/repo", "src/big.rs", Agent::Codex)];
-        let s = applescript("/repo", "/bin/sauron", 1, &work, &orcs, Agent::Codex);
+        let s = applescript(
+            "/repo",
+            "/bin/sauron",
+            1,
+            &work,
+            &orcs,
+            Agent::Codex,
+            false,
+        );
         assert!(s.contains("codex resume id-1")); // hobbit resumes via codex
         assert!(s.contains("codex exec 'This file is safe")); // orc runs codex exec
         assert!(s.contains("/bin/sauron --codex")); // watcher pane watches codex
@@ -622,6 +703,24 @@ mod tests {
         assert!(c.contains("src/big.rs"));
         // No double quotes, or it would break the AppleScript string it sits in.
         assert!(!c.contains('"'), "orc command must be double-quote-free: {c}");
+    }
+
+    #[test]
+    fn strict_clipboard_mode_wraps_fresh_and_resumed_panes() {
+        let work = vec![("id-1".to_string(), "task one".to_string())];
+        let s = applescript(
+            "/repo",
+            "/bin/sauron",
+            2,
+            &work,
+            &[],
+            Agent::Claude,
+            true,
+        );
+        assert_eq!(s.matches("handoff-run").count(), 2);
+        assert!(s.contains("--resume 'id-1'"));
+        assert!(s.contains("slot.0.handoff"));
+        assert!(s.contains("slot.1.handoff"));
     }
 
     #[test]

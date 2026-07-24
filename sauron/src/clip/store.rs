@@ -743,15 +743,21 @@ pub struct UpdateOptions {
 }
 
 pub fn default_db_path() -> PathBuf {
+    let start = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    db_path_from(&start)
+}
+
+/// Resolve the clipboard database as if the process were running inside
+/// `start`. Workspace panes use this before launch so their storage identity
+/// does not depend on a new terminal session's inherited cwd.
+pub fn db_path_from(start: &Path) -> PathBuf {
     if let Some(path) = std::env::var_os("AGENT_CLIPBOARD_DB") {
         return expand_home(PathBuf::from(path));
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        for dir in cwd.ancestors() {
-            let candidate = dir.join(".agent-clipboard").join("clipboard.sqlite3");
-            if candidate.exists() {
-                return candidate;
-            }
+    for dir in start.ancestors() {
+        let candidate = dir.join(".agent-clipboard").join("clipboard.sqlite3");
+        if candidate.exists() {
+            return candidate;
         }
     }
     let home = home_dir();

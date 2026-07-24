@@ -25,6 +25,12 @@ pub fn run(args: &[String]) -> io::Result<()> {
     let prior_version = prior.as_ref().map_or(0, |item| item.version);
     let nonce = pass_nonce(&parsed.key);
     let context = load_context(&store, prior.as_ref(), &namespace).map_err(other)?;
+    eprintln!(
+        "sauron handoff: db={} key={} prior_version={}",
+        store.path().display(),
+        parsed.key,
+        prior_version
+    );
     let exe = std::env::current_exe()?;
     let prompt = lifecycle_prompt(
         parsed.task.as_deref(),
@@ -93,6 +99,12 @@ pub fn workspace_command(
         shell_quote(repo.to_string_lossy().as_ref()),
         "--key".into(),
         shell_quote(key),
+        "--db".into(),
+        shell_quote(
+            crate::clip::store::db_path_from(repo)
+                .to_string_lossy()
+                .as_ref(),
+        ),
     ];
     if let Some(resume) = resume {
         parts.push("--resume".into());
@@ -161,10 +173,14 @@ fn load_context(
             items.push(item);
         }
     }
+    let mut context = prior_status(
+        prior.map(|item| item.key.as_str()).unwrap_or_default(),
+        prior.map(|item| item.version),
+    );
     if items.is_empty() {
-        return Ok("(no prior project clipboard entries; this is the first pass)".into());
+        context.push_str("\n(no prior project clipboard entries; this is the first pass)");
+        return Ok(context);
     }
-    let mut context = String::new();
     for item in items {
         let block = format!(
             "\n--- {} [{}; v{}; validated={}; pinned={}] ---\n{}\n",
@@ -177,6 +193,19 @@ fn load_context(
         context.push_str(&block);
     }
     Ok(context)
+}
+
+fn prior_status(key: &str, version: Option<i64>) -> String {
+    match version {
+        Some(version) => format!(
+            "SAURON_PRIOR_HANDOFF_STATUS=loaded\n\
+             SAURON_PRIOR_HANDOFF_KEY={key}\n\
+             SAURON_PRIOR_HANDOFF_VERSION={version}\n"
+        ),
+        None => "SAURON_PRIOR_HANDOFF_STATUS=absent_first_pass\n\
+                 SAURON_PRIOR_HANDOFF_VERSION=0\n"
+            .into(),
+    }
 }
 
 fn lifecycle_prompt(
@@ -353,13 +382,14 @@ mod tests {
         assert!(command.contains("handoff-run"));
         assert!(command.contains("--resume 'session'"));
         assert!(command.contains("--agent codex"));
+        assert!(command.contains("--db"));
     }
 
     #[test]
     fn prompt_requires_structured_nonce_handoff() {
         let prompt = lifecycle_prompt(
             None,
-            "context",
+            "SAURON_PRIOR_HANDOFF_STATUS=absent_first_pass\ncontext",
             Path::new("/bin/sauron"),
             Path::new("/tmp/clip.sqlite3"),
             "key",
@@ -369,5 +399,14 @@ mod tests {
         assert!(prompt.contains("pass_nonce must be exactly nonce"));
         assert!(prompt.contains("clip --db"));
         assert!(prompt.contains("repo_state"));
+        assert!(prompt.contains("SAURON_PRIOR_HANDOFF_STATUS=absent_first_pass"));
+    }
+
+    #[test]
+    fn prompt_marks_an_exact_prior_handoff_as_loaded() {
+        let status = prior_status("lane.key", Some(3));
+        assert!(status.contains("SAURON_PRIOR_HANDOFF_STATUS=loaded"));
+        assert!(status.contains("SAURON_PRIOR_HANDOFF_KEY=lane.key"));
+        assert!(status.contains("SAURON_PRIOR_HANDOFF_VERSION=3"));
     }
 }

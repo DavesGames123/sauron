@@ -48,21 +48,59 @@ impl Mordor {
     pub const DEFAULT_MODEL: &'static str = "qwen3-coder";
     /// Ollama's default listen address.
     pub const DEFAULT_BASE_URL: &'static str = "http://localhost:11434";
+    /// Where the `--nostromo` endpoint is read from, when `$SAURON_NOSTROMO_URL`
+    /// is unset: `~/.claude/sauron/<this>`. Kept under the user's home, never in
+    /// the repo, so a private tailnet hostname is not committed to a shared tree.
+    pub const NOSTROMO_URL_FILE: &'static str = "nostromo-url";
 
-    /// Build from an optional model override, defaulting to the Qwen coder. The
-    /// endpoint defaults to local Ollama but bends to `$SAURON_MORDOR_URL` for a
-    /// box that serves it elsewhere (a remote Ollama, a different port).
-    pub fn new(model: Option<String>) -> Mordor {
-        let base_url = std::env::var("SAURON_MORDOR_URL")
-            .ok()
+    /// Build from an optional model override and an optional explicit endpoint,
+    /// defaulting to the Qwen coder on local Ollama. Endpoint precedence: the
+    /// explicit `url` (a flag) wins, then `$SAURON_MORDOR_URL`, then local Ollama.
+    /// A trailing slash is stripped so the client's `/v1/messages` never doubles
+    /// up against a `…/` base.
+    pub fn new(model: Option<String>, url: Option<String>) -> Mordor {
+        let base_url = url
             .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                std::env::var("SAURON_MORDOR_URL")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            })
             .unwrap_or_else(|| Self::DEFAULT_BASE_URL.to_string());
         Mordor {
             model: model
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| Self::DEFAULT_MODEL.to_string()),
-            base_url,
+            base_url: base_url.trim().trim_end_matches('/').to_string(),
         }
+    }
+
+    /// Mordor pointed at the `nostromo` box over Tailscale. The endpoint is a
+    /// private tailnet hostname, so it is **never** hard-coded here: it comes
+    /// from `$SAURON_NOSTROMO_URL`, else the first line of
+    /// `~/.claude/sauron/nostromo-url`. Returns `None` when neither is set --
+    /// the caller then tells the user how to configure it rather than guessing.
+    pub fn nostromo(model: Option<String>) -> Option<Mordor> {
+        Self::nostromo_url().map(|url| Mordor::new(model, Some(url)))
+    }
+
+    /// Resolve the nostromo endpoint from local config only -- env first, then
+    /// the home-dir file. See [`Mordor::nostromo`] for why it lives off-repo.
+    pub fn nostromo_url() -> Option<String> {
+        if let Ok(u) = std::env::var("SAURON_NOSTROMO_URL") {
+            let u = u.trim();
+            if !u.is_empty() {
+                return Some(u.to_string());
+            }
+        }
+        let path = home()
+            .join(".claude")
+            .join("sauron")
+            .join(Self::NOSTROMO_URL_FILE);
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| s.lines().next().map(|l| l.trim().to_string()))
+            .filter(|s| !s.is_empty())
     }
 }
 
@@ -237,8 +275,24 @@ mod tests {
 
     #[test]
     fn mordor_new_defaults_to_the_qwen_coder() {
-        assert_eq!(Mordor::new(None).model, "qwen3-coder");
-        assert_eq!(Mordor::new(Some("  ".into())).model, "qwen3-coder");
-        assert_eq!(Mordor::new(Some("qwen2.5-coder:7b".into())).model, "qwen2.5-coder:7b");
+        assert_eq!(Mordor::new(None, None).model, "qwen3-coder");
+        assert_eq!(Mordor::new(Some("  ".into()), None).model, "qwen3-coder");
+        assert_eq!(
+            Mordor::new(Some("qwen2.5-coder:7b".into()), None).model,
+            "qwen2.5-coder:7b"
+        );
+    }
+
+    #[test]
+    fn mordor_strips_a_trailing_slash_on_an_explicit_url() {
+        // A trailing slash on the endpoint is stripped so the client's
+        // `/v1/messages` doesn't land as `…ts.net//v1/messages`. (Fake host --
+        // the real tailnet URL never appears in the repo.)
+        let m = Mordor::new(
+            Some("qwen2.5-coder:7b".into()),
+            Some("https://box.example.ts.net/".into()),
+        );
+        assert_eq!(m.base_url, "https://box.example.ts.net");
+        assert_eq!(m.model, "qwen2.5-coder:7b");
     }
 }

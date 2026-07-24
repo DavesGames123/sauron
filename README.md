@@ -273,7 +273,11 @@ sauron prepends to each servant pane:
 sauron workspace 5 --mordor                    # 5 hobbits on the local model
 sauron workspace 5 --mordor --orcs 2           # …and 2 local orcs
 sauron workspace 5 --mordor=qwen2.5-coder:7b   # pick the model (see below)
+sauron workspace 5 --nostromo                  # …on a remote box over Tailscale (see below)
 ```
+
+So a session fires against **cloud** (plain `sauron workspace`), the **local Mac**
+(`--mordor`), or a **remote box over Tailscale** (`--nostromo`) — your call, per launch.
 
 ### Prerequisites
 
@@ -317,6 +321,34 @@ GPU. Override it inline, and point at a non-default Ollama with `$SAURON_MORDOR_
 | The default coder | `--mordor` |
 | A specific tag | `--mordor=qwen2.5-coder:7b` (the right call on an 8GB box) |
 | A remote / non-standard Ollama | `SAURON_MORDOR_URL=http://box:11434 sauron workspace 4 --mordor` |
+| A remote box over Tailscale | `--nostromo` (endpoint from local config — see below) |
+
+### Over Tailscale — `--nostromo`
+
+`--nostromo` is `--mordor` pointed at another box's Ollama over your tailnet — fire
+a local swarm on the beefy machine from your laptop. It takes a model tag the same
+way (`--nostromo=qwen2.5-coder:7b`).
+
+The endpoint is a **private tailnet hostname, so it is never stored in this repo.**
+sauron reads it from your machine only — `$SAURON_NOSTROMO_URL`, or the first line of
+`~/.claude/sauron/nostromo-url`:
+
+```bash
+# set it once (choose either); the URL is the Ollama root over Tailscale
+echo 'https://<your-box>.<tailnet>.ts.net' > ~/.claude/sauron/nostromo-url
+# or: export SAURON_NOSTROMO_URL=https://<your-box>.<tailnet>.ts.net
+```
+
+On the **serving box**, `tailscale serve` must terminate HTTPS on :443 and proxy to
+Ollama at the root, and Ollama must listen beyond loopback so the tunnel can reach it:
+
+```bash
+OLLAMA_HOST=0.0.0.0:11434 ollama serve          # bind past 127.0.0.1, or the tunnel gets refused
+tailscale serve --bg --https=443 http://127.0.0.1:11434
+```
+
+Run `--nostromo` with neither the env var nor the file set and sauron tells you how to
+set them rather than guessing an endpoint.
 
 > **Claude Code only, for now.** Mordor rides Ollama's *Anthropic*-compatible API,
 > which is Claude Code's wire format. Codex reaches local models a different way

@@ -65,7 +65,9 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
     let mut clipboard_handoff = false;
     let mut yes = false; // skip the confirmation dialogue
     // Mordor mode: run the servants against a local model. `--mordor` takes the
-    // Qwen default; `--mordor=<tag>` picks another Ollama model.
+    // Qwen default on local Ollama; `--mordor=<tag>` picks another Ollama model.
+    // `--nostromo[=<tag>]` is the same, but pointed at the nostromo box over
+    // Tailscale instead of localhost -- a remote local-swarm in one word.
     let mut mordor: Option<Mordor> = None;
     let mut pos: Vec<&str> = Vec::new();
     let mut i = 0;
@@ -84,10 +86,31 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
             orcs = rest.parse().unwrap_or(0);
             i += 1;
         } else if a == "--mordor" {
-            mordor = Some(Mordor::new(None));
+            mordor = Some(Mordor::new(None, None));
             i += 1;
         } else if let Some(rest) = a.strip_prefix("--mordor=") {
-            mordor = Some(Mordor::new(Some(rest.to_string())));
+            mordor = Some(Mordor::new(Some(rest.to_string()), None));
+            i += 1;
+        } else if a == "--nostromo" || a.starts_with("--nostromo=") {
+            // Same as --mordor, but pointed at the nostromo box over Tailscale.
+            // The URL is private, so it is read from local config, never source;
+            // if it isn't set, say how to set it rather than guessing an endpoint.
+            let tag = a.strip_prefix("--nostromo=").map(str::to_string);
+            match Mordor::nostromo(tag) {
+                Some(m) => mordor = Some(m),
+                None => {
+                    eprintln!(
+                        "sauron workspace: --nostromo needs the box's Ollama URL, and it is not set."
+                    );
+                    eprintln!(
+                        "  export SAURON_NOSTROMO_URL=https://<your-box>.<tailnet>.ts.net, or write that"
+                    );
+                    eprintln!(
+                        "  URL to ~/.claude/sauron/nostromo-url (kept out of the repo)."
+                    );
+                    std::process::exit(2);
+                }
+            }
             i += 1;
         } else if a == "--yes" || a == "-y" {
             yes = true;

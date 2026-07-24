@@ -203,6 +203,12 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
         println!("AGENT={}", agent.label());
         println!("TOTAL={total}");
         println!("CLIPBOARD_HANDOFF={clipboard_handoff}");
+        if clipboard_handoff {
+            println!(
+                "CLIPBOARD_DB={}",
+                crate::clip::store::db_path_from(&repo).display()
+            );
+        }
         println!("SAURON={}", sauron_exe.display());
         for t in &orc_targets {
             println!("ORC={t}");

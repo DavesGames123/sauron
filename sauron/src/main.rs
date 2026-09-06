@@ -129,6 +129,8 @@ struct OrcPick {
     hot: usize,
     /// Candidates excluded because git reports them dirty.
     dirty: usize,
+    /// Candidates excluded because git marks them vendored or generated.
+    vendored: usize,
     selected: usize,
 }
 
@@ -422,8 +424,8 @@ impl App {
         if survey.cold.is_empty() {
             self.flash_spawn(
                 format!(
-                    "no cold files to loose an orc on ({} hot, {} dirty)",
-                    survey.hot, survey.dirty
+                    "no cold files to loose an orc on ({} hot, {} dirty, {} vendored)",
+                    survey.hot, survey.dirty, survey.vendored
                 ),
                 false,
             );
@@ -433,6 +435,7 @@ impl App {
             cold: survey.cold,
             hot: survey.hot,
             dirty: survey.dirty,
+            vendored: survey.vendored,
             selected: 0,
         });
     }
@@ -799,7 +802,10 @@ fn main() -> std::io::Result<()> {
             .as_ref()
             .map(|p| p.cold.clone())
             .unwrap_or_default();
-        let pick_meta = app.orc_pick.as_ref().map(|p| (p.selected, p.hot, p.dirty));
+        let pick_meta = app
+            .orc_pick
+            .as_ref()
+            .map(|p| (p.selected, p.hot, p.dirty, p.vendored));
 
         // Re-checked per frame, not cached at launch: the directory is created
         // the moment the user starts an agent in this repo, and the empty-state
@@ -822,11 +828,12 @@ fn main() -> std::io::Result<()> {
             anim_ms: anim_start.elapsed().as_millis() as u64,
             local_offset: app.local_offset,
             awaiting_log_dir: awaiting_log_dir.as_deref(),
-            pick: pick_meta.map(|(selected, hot, dirty)| ui::PickView {
+            pick: pick_meta.map(|(selected, hot, dirty, vendored)| ui::PickView {
                 cold: &pick_cold,
                 selected,
                 hot,
                 dirty,
+                vendored,
             }),
             scroll: app.scroll,
             follow: app.follow,

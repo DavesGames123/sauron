@@ -24,8 +24,9 @@
 //!   fn run               -- the `sauron orc <file>` subcommand itself
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::agent::Agent;
 
@@ -256,6 +257,10 @@ pub struct Survey {
     pub cold: Vec<Target>,
     pub hot: usize,
     pub dirty: usize,
+    /// Tracked source files git marks vendored or generated. Excluded before
+    /// ranking: a vendored tree is pinned upstream or machine-written, so its
+    /// line count is not this repo's to carry and an orc must not refactor it.
+    pub vendored: usize,
 }
 
 /// Rank the tracked source files no live session is touching and git reports
@@ -285,9 +290,16 @@ pub fn survey(repo: &Path, hot: &BTreeSet<String>) -> Survey {
         }
     }
 
+    let tracked = git_lines(repo, &["ls-files"]);
+    let vendored = vendored(repo, &tracked);
+
     let mut survey = Survey::default();
-    for path in git_lines(repo, &["ls-files"]) {
+    for path in tracked {
         if !is_code(&path) {
+            continue;
+        }
+        if vendored.contains(&path) {
+            survey.vendored += 1;
             continue;
         }
         if hot.contains(&path) {
@@ -328,6 +340,61 @@ pub fn is_code(path: &str) -> bool {
         return false;
     }
     matches!(path.rsplit_once('.'), Some((_, ext)) if EXT.contains(&ext))
+}
+
+/// The subset of `paths` git marks `linguist-vendored` or `linguist-generated`.
+///
+/// A repo carries trees it links but does not author -- a vendored crate, the
+/// machine-written FFI bindings beside it. Their line count is not the repo's
+/// to carry, and an orc loosed on one would fork code that must stay diffable
+/// against its upstream. `.gitattributes` is where a repo already records which
+/// paths those are, so this reads that record rather than a hardcoded prefix
+/// list that would rot the first time a vendored tree moved.
+///
+/// One `git check-attr` reads the whole list through stdin, so the cost is one
+/// subprocess, not one per file. The `-z` output is NUL-separated triples of
+/// `path`, `attribute`, `value`; a value of `set` or `true` means the path
+/// carries that attribute. Any failure returns an empty set, which surveys the
+/// vendored files back in rather than hiding a git error as a clean repo.
+fn vendored(repo: &Path, paths: &[String]) -> BTreeSet<String> {
+    let mut child = match Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "check-attr",
+            "--stdin",
+            "-z",
+            "linguist-vendored",
+            "linguist-generated",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return BTreeSet::new(),
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        for path in paths {
+            if stdin.write_all(path.as_bytes()).is_err() || stdin.write_all(b"\0").is_err() {
+                break;
+            }
+        }
+    }
+    let Ok(out) = child.wait_with_output() else {
+        return BTreeSet::new();
+    };
+    let mut set = BTreeSet::new();
+    let fields: Vec<&[u8]> = out.stdout.split(|b| *b == 0).collect();
+    for triple in fields.chunks(3) {
+        if let [path, _attr, value] = triple {
+            if value == b"set" || value == b"true" {
+                set.insert(String::from_utf8_lossy(path).into_owned());
+            }
+        }
+    }
+    set
 }
 
 /// Lines of `git -C <repo> <args>` stdout, empty on any failure.
@@ -545,5 +612,52 @@ mod tests {
         // …and the brief tells the orc which directory to run it from.
         assert!(brief("sauron/src/scan.rs", &c)
             .contains("cargo build --all-targets (from sauron/)"));
+    }
+
+    /// A vendored or generated path named by `.gitattributes` is surveyed out;
+    /// an authored one is kept. Runs against a throwaway git repo whose only
+    /// content is the attributes file -- `git check-attr` matches patterns from
+    /// the working tree and needs no commit.
+    #[test]
+    fn vendored_reads_gitattributes() {
+        // The fixture path carries the pid: several test processes share this
+        // checkout, and a fixed path would have each delete the other's dir.
+        let dir = std::env::temp_dir().join(format!("sauron_orc_vendored_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        let init = Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["init", "-q"])
+            .status();
+        if init.map(|s| !s.success()).unwrap_or(true) {
+            // No git on this host; skip rather than fail off a missing tool.
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        std::fs::write(
+            dir.join(".gitattributes"),
+            "vendor/** linguist-vendored\nvendor/**/ffi_*.rs linguist-generated\n",
+        )
+        .expect("write .gitattributes");
+        let paths = vec![
+            "vendor/wgpu-0.16/src/lib.rs".to_string(),
+            "vendor/android/ffi_x86_64.rs".to_string(),
+            "warp_core/src/real.rs".to_string(),
+        ];
+        let set = vendored(&dir, &paths);
+        assert!(
+            set.contains("vendor/wgpu-0.16/src/lib.rs"),
+            "vendored upstream source is held back: {set:?}"
+        );
+        assert!(
+            set.contains("vendor/android/ffi_x86_64.rs"),
+            "generated FFI is held back: {set:?}"
+        );
+        assert!(
+            !set.contains("warp_core/src/real.rs"),
+            "authored source is kept: {set:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

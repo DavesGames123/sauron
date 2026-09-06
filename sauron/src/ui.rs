@@ -279,6 +279,8 @@ pub struct PickView<'a> {
     pub hot: usize,
     /// Candidates excluded because git reports them dirty.
     pub dirty: usize,
+    /// Candidates excluded because git marks them vendored or generated.
+    pub vendored: usize,
 }
 
 /// Screen geometry of the last-drawn board, so a mouse event can be resolved to
@@ -483,10 +485,11 @@ fn orc_picker(f: &mut Frame, full: Rect, pick: &PickView) {
 
     lines.push(Line::from(Span::styled(
         format!(
-            "  {} cold · {} hot · {} dirty held back",
+            "  {} cold · {} hot · {} dirty · {} vendored held back",
             pick.cold.len(),
             pick.hot,
-            pick.dirty
+            pick.dirty,
+            pick.vendored
         ),
         Style::default().fg(DIM),
     )));
@@ -2012,6 +2015,7 @@ mod tests {
                 selected: 0,
                 hot: 3,
                 dirty: 9,
+                vendored: 0,
             }),
             scroll: [0; GROUPS],
             follow: true,

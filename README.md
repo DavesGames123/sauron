@@ -21,7 +21,8 @@ A read-only sidecar for running **many coding agents at once** — [Claude Code]
 ![Rust](https://img.shields.io/badge/built_with-Rust-CE422B?style=for-the-badge&logo=rust&logoColor=white)
 ![ratatui](https://img.shields.io/badge/TUI-ratatui-7C3AED?style=for-the-badge)
 ![Agents](https://img.shields.io/badge/agents-Claude_·_Codex-FF7A18?style=for-the-badge)
-![macOS](https://img.shields.io/badge/workspace-macOS_·_iTerm2-000000?style=for-the-badge&logo=apple&logoColor=white)
+![macOS](https://img.shields.io/badge/macOS-iTerm2-000000?style=for-the-badge&logo=apple&logoColor=white)
+![Windows](https://img.shields.io/badge/Windows-Windows_Terminal-0078D6?style=for-the-badge&logo=windowsterminal&logoColor=white)
 ![Read only](https://img.shields.io/badge/watcher_repo_writes-none-2EA043?style=for-the-badge)
 
 </div>
@@ -567,6 +568,37 @@ Three things are **macOS only** and say so rather than failing quietly:
 - `git` on `PATH`, as on any platform
 
 </details>
+
+<details>
+<summary><b>Build and run</b></summary>
+
+<br>
+
+```powershell
+# the shortest path: build, serve, and open the board in a browser
+.\run.ps1
+
+# …or drive the binary yourself
+cargo build --release --manifest-path sauron\Cargo.toml
+.\sauron\target\release\sauron.exe                 # watch the repo you're in
+.\sauron\target\release\sauron.exe C:\path\to\repo # …or a specific one
+```
+
+`run.ps1` is the PowerShell twin of `run.sh`: same flags (`--port`, `--tui`,
+`--no-open`, `--agents 0`, …), same free-port walk, same Ctrl-C stops
+everything.
+
+</details>
+
+> **Verification status.** The Windows build is cross-compiled clean from macOS
+> — `cargo check` **and** `cargo build --release`, `--all-targets --target
+> x86_64-pc-windows-gnu` — and the Windows-only logic is unit-tested: the
+> `wt.exe` argv, the PowerShell command translation, `PATHEXT` resolution, and
+> the `%USERPROFILE%\.claude\projects` directory probe. What is **not** yet
+> confirmed on real hardware: that `wt.exe` accepts the argv, that the clipboard
+> round-trips through `clip.exe`, and that the projects-dir encoding matches
+> Claude Code's on Windows. `run.ps1` is likewise unrun. A `~/.claude/projects`
+> listing or a bug report from a Windows machine is the missing piece.
 
 ---
 

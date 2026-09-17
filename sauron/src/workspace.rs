@@ -408,6 +408,7 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
     }
     #[cfg(not(unix))]
     {
+        let window = wt_window_name(&repo_s);
         let argv = wt_layout_argv(
             &repo_s,
             &sauron_exe.to_string_lossy(),
@@ -428,6 +429,13 @@ pub fn run(args: &[String], explicit_agent: Option<Agent>) -> std::io::Result<()
             }
             return Ok(());
         }
+        // Publish the workspace identity as inherited env vars rather than as
+        // PowerShell `$env:X='Y';` statements inside each pane's `-Command`.
+        // wt.exe treats `;` as its own subcommand separator even inside a
+        // double-quoted argument, so a `-Command` that contains one gets split
+        // apart and the pane launches the wrong thing.
+        std::env::set_var(crate::plat::WT_WINDOW_ENV, &window);
+        std::env::set_var(crate::plat::WT_PANE_ENV, "1");
         crate::plat::run_wt_layout(&argv)?;
     }
 
@@ -1045,7 +1053,10 @@ fn wt_layout_argv(
     let mut argv = vec![
         "-w".to_string(),
         window.clone(),
-        "--fullscreen".to_string(),
+        // No --fullscreen on Windows: let the user size the window themselves.
+        // macOS goes native-fullscreen onto its own Space, which is expected
+        // there; on Windows a fullscreen terminal just covers everything.
+        //
         // The agent column starts as the whole window.
         "new-tab".to_string(),
         "--title".to_string(),
@@ -1054,7 +1065,7 @@ fn wt_layout_argv(
         repo.to_string(),
         "--".to_string(),
     ];
-    argv.extend(pane_shell(&lefts[0], &window, SAURON_PANE));
+    argv.extend(pane_shell(&lefts[0]));
 
     // Carve the Eye's column off the whole height, before anything subdivides.
     push_split(
@@ -1062,7 +1073,7 @@ fn wt_layout_argv(
         "--vertical",
         repo,
         "sauron",
-        pane_shell(&format!("{sauron_exe} {repo}"), &window, SAURON_PANE),
+        pane_shell(&format!("{sauron_exe} {repo}")),
     );
 
     // The rest of the right column, beneath the Eye: the orcs, then two shells --
@@ -1073,7 +1084,7 @@ fn wt_layout_argv(
             "--horizontal",
             repo,
             "orc",
-            pane_shell(cmd, &window, SAURON_PANE),
+            pane_shell(cmd),
         );
     }
     for _ in 0..2 {
@@ -1097,7 +1108,7 @@ fn wt_layout_argv(
             "--horizontal",
             repo,
             &titles[i],
-            pane_shell(cmd, &window, SAURON_PANE),
+            pane_shell(cmd),
         );
     }
 
@@ -1124,26 +1135,77 @@ fn push_split(argv: &mut Vec<String>, axis: &str, repo: &str, title: &str, cmd: 
     argv.extend(cmd);
 }
 
-/// A pane's commandline: a PowerShell that publishes which window and which pane
-/// this workspace is, then runs the pane's own command.
+/// A pane's commandline: PowerShell running the pane's own command.
 ///
-/// The two env vars are the whole of what replaces `$ITERM_SESSION_ID`. iTerm
-/// tells a process which session it is running in; `wt` tells it nothing, so the
-/// launch that *knows* has to say so here, and a sauron started by hand outside a
-/// workspace correctly finds neither.
+/// The workspace identity (`SAURON_WT_WINDOW`, `SAURON_WT_PANE`) is inherited
+/// from the process environment rather than embedded here. Embedding them as
+/// `$env:X='Y'; ` statements inside `-Command` put `;` in the argument, and
+/// wt.exe treats `;` as its own subcommand separator even inside a
+/// double-quoted string -- splitting the command and launching the wrong thing.
 #[cfg_attr(unix, allow(dead_code))]
-fn pane_shell(cmd: &str, window: &str, sauron_pane: u32) -> Vec<String> {
-    let prelude = format!(
-        "$env:SAURON_WT_WINDOW='{}'; $env:SAURON_WT_PANE='{sauron_pane}'; ",
-        window.replace('\'', "''"),
-    );
+fn pane_shell(cmd: &str) -> Vec<String> {
+    let mut ps = crate::plat::to_powershell(cmd);
+
+    // wt.exe is an IPC stub: it sends the command to the running Terminal
+    // instance, so panes inherit Terminal's environment, not sauron's.
+    // Resolve the program to a full path so it is found regardless of the
+    // pane's PATH.
+    let prog_end = ps.find(' ').unwrap_or(ps.len());
+    let resolved = resolve_for_wt(&ps[..prog_end]);
+    if resolved != ps[..prog_end] {
+        ps = format!("{resolved}{}", &ps[prog_end..]);
+    }
+
     vec![
         crate::plat::shell_exe(),
         "-NoExit".to_string(),
         "-NoLogo".to_string(),
         "-Command".to_string(),
-        format!("{prelude}{}", crate::plat::to_powershell(cmd)),
+        ps,
     ]
+}
+
+/// Resolve a bare program name to a full path for a Windows Terminal pane.
+///
+/// `resolve_program` searches the current process's PATH, but that may not
+/// include directories the user has added since this Terminal instance started.
+/// This widens the search to well-known install locations for agents so the
+/// pane command works even when sauron's own PATH is stale.
+#[cfg_attr(unix, allow(dead_code))]
+fn resolve_for_wt(name: &str) -> String {
+    use std::path::Path;
+
+    let resolved = crate::plat::resolve_program(name);
+    if resolved != name {
+        return resolved;
+    }
+
+    // Well-known locations: Claude Code's official installer puts it in
+    // ~/.local/bin; npm globals land in %APPDATA%/npm.
+    let extra_dirs: Vec<std::path::PathBuf> = [
+        std::env::var("USERPROFILE")
+            .ok()
+            .map(|h| Path::new(&h).join(".local").join("bin")),
+        std::env::var("APPDATA")
+            .ok()
+            .map(|a| Path::new(&a).join("npm")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let pathext =
+        std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    for dir in &extra_dirs {
+        for ext in pathext.split(';').filter(|e| !e.trim().is_empty()) {
+            let candidate = dir.join(format!("{name}{ext}"));
+            if candidate.is_file() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+    }
+
+    name.to_string()
 }
 
 /// The `wt` window name this repo's workspace owns. Named rather than `0` (the
@@ -2217,7 +2279,7 @@ mod tests {
     }
 
     #[test]
-    fn wt_layout_opens_one_named_fullscreen_window_per_repo() {
+    fn wt_layout_opens_one_named_window_per_repo() {
         let argv = wt_layout_argv(
             "C:\\code\\my repo",
             "sauron.exe",
@@ -2232,7 +2294,9 @@ mod tests {
         // Named, not `0`: two workspaces open at once must each grow themselves
         // rather than race for whichever window was last touched.
         assert_eq!(argv[1], "sauron-my-repo");
-        assert!(argv.contains(&"--fullscreen".to_string()));
+        // No --fullscreen on Windows: a fullscreen terminal just covers
+        // everything, unlike macOS where it gets its own Space.
+        assert!(!argv.contains(&"--fullscreen".to_string()));
     }
 
     #[test]
@@ -2269,9 +2333,10 @@ mod tests {
 
     #[test]
     fn wt_layout_tells_every_pane_which_window_and_which_pane_the_eye_is() {
-        // This pair is the whole of what stands in for $ITERM_SESSION_ID. Without
-        // it a sauron inside the workspace cannot tell which window to grow, and
-        // silently falls back to "whichever was last used".
+        // The env vars are set on the *process* before launching wt, so they
+        // flow to every pane via inheritance rather than appearing in the argv.
+        // The argv must NOT contain them (a semicolon inside -Command would
+        // split the pane command apart).
         let argv = wt_layout_argv(
             "C:\\r",
             "sauron.exe",
@@ -2283,8 +2348,8 @@ mod tests {
             false,
         );
         let joined = argv.join(" ");
-        assert!(joined.contains("$env:SAURON_WT_WINDOW='sauron-r';"));
-        assert!(joined.contains("$env:SAURON_WT_PANE='1';"));
+        assert!(!joined.contains("$env:SAURON_WT_WINDOW"));
+        assert!(!joined.contains("$env:SAURON_WT_PANE"));
         // And the layout leaves the user on that pane.
         assert!(argv.windows(2).any(|w| w == ["--target", "1"]));
     }
@@ -2320,7 +2385,7 @@ mod tests {
     fn wt_layout_never_hands_a_bare_semicolon_to_a_pane_command() {
         // `wt` reads a lone `;` argv element as a subcommand separator. A pane
         // command carrying one as *text* would be torn in half and the tail run
-        // as a second wt subcommand, so every command must arrive as one element.
+        // as a second wt subcommand, so no -Command argument may contain one.
         let argv = wt_layout_argv(
             "C:\\r",
             "sauron.exe",
@@ -2331,14 +2396,25 @@ mod tests {
             None,
             false,
         );
-        // The prelude that sets the env vars contains semicolons by construction;
-        // assert it survives as a single argument rather than as separators.
-        let prelude = argv
-            .iter()
-            .find(|a| a.contains("$env:SAURON_WT_WINDOW"))
-            .expect("prelude");
-        assert!(prelude.contains(';'));
-        assert_ne!(prelude.as_str(), ";");
+        // Walk consecutive pairs: everything after `-Command` is the pane's
+        // PowerShell text. None of those arguments may contain a semicolon.
+        let mut in_command = false;
+        for a in &argv {
+            if a == ";" {
+                in_command = false;
+                continue;
+            }
+            if a == "-Command" {
+                in_command = true;
+                continue;
+            }
+            if in_command {
+                assert!(
+                    !a.contains(';'),
+                    "semicolon inside -Command would split the pane: {a}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2357,7 +2433,9 @@ mod tests {
             false,
         );
         let joined = argv.join(" ");
-        assert!(joined.contains("claude --resume abc"));
+        // The program may be resolved to a full path (resolve_program), so
+        // check for the resume flag and id rather than the bare program name.
+        assert!(joined.contains("--resume abc"));
         assert!(!joined.contains("&&"));
         // The directory did not simply vanish -- it moved to `-d`.
         assert!(argv.windows(2).any(|w| w == ["-d", "C:\\r"]));

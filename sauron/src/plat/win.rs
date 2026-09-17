@@ -156,7 +156,8 @@ pub fn run_wt_layout(argv: &[String]) -> std::io::Result<()> {
 /// is no equivalent of iTerm's `ERR <why>` string, so a failure here can say
 /// that the split was refused but not why.
 fn run_wt(argv: &[String]) -> Result<(), String> {
-    match Command::new("wt.exe").args(argv).status() {
+    let wt = find_wt();
+    match Command::new(&wt).args(argv).status() {
         Ok(s) if s.success() => Ok(()),
         Ok(s) => Err(format!(
             "{WORKSPACE_HOST} refused the split (exit {})",
@@ -167,6 +168,23 @@ fn run_wt(argv: &[String]) -> Result<(), String> {
         }
         Err(e) => Err(format!("could not run wt.exe: {e}")),
     }
+}
+
+/// Find `wt.exe`, checking the well-known App Execution Alias location when
+/// a bare name would miss it. Windows Terminal is a Store app whose exe in
+/// `%LOCALAPPDATA%\Microsoft\WindowsApps` is an AppExecLink reparse point;
+/// some process-launch paths cannot resolve it by name alone.
+fn find_wt() -> String {
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        let candidate = Path::new(&local)
+            .join("Microsoft")
+            .join("WindowsApps")
+            .join("wt.exe");
+        if candidate.exists() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    "wt.exe".to_string()
 }
 
 /// The `wt` window to target. The one `sauron workspace` launched, when this
